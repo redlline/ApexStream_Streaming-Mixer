@@ -2026,9 +2026,8 @@ async function checkstreamStart(){
       const v=$("#csVideo"),src="/checkhls/index.m3u8";
       if(window.Hls&&Hls.isSupported()){
         CS_HLS_OBJ=new Hls({liveDurationInfinity:true});
-        CS_HLS_OBJ.loadSource(src);CS_HLS_OBJ.attachMedia(v);
-      }else{v.src=src}
-      v.play().catch(()=>{});
+      }
+      hlsAttach(CS_HLS_OBJ, v, src);
     }
   },2000);
 }
@@ -2133,6 +2132,36 @@ function multiviewStop(withPgm=true){
 }
 // ---- Program: большой плеер выбранного потока + панель горячих кнопок.
 // Плитка мультивью с жёлтой рамкой/меткой PGM = что сейчас в большом плеере.
+// Подключение источника к <video> — общая точка для ВСЕХ плееров панели
+// (PGM, большой плеер, «Проверка», превью OBS).
+//
+// Почему не просто attachMedia + play(): play(), вызванный сразу после
+// attachMedia(), браузер отклоняет — манифест ещё не разобран и буфер пуст.
+// Ошибку глотал .catch(), и плеер молча оставался НА ПАУЗЕ: снаружи это
+// выглядело как «долго крутит чёрный экран, потом появляется один кадр, но
+// воспроизведение не идёт». Особенно заметно было при повторном включении
+// превью, когда элемент уже прошёл через pause()+load().
+// Поэтому запускаем воспроизведение по готовности манифеста.
+//
+// Второе: без обработчика ошибок hls.js при обрыве сети или порче сегмента
+// висел вечно — тот же чёрный экран, но уже без шансов восстановиться.
+// Фатальные ошибки лечим штатным способом (перезапуск загрузки / сброс
+// медиа-буфера), нефатальные hls.js разбирает сам.
+function hlsAttach(hls, v, url){
+  if(hls){
+    hls.on(Hls.Events.MANIFEST_PARSED, ()=>{ v.play().catch(()=>{}) });
+    hls.on(Hls.Events.ERROR, (_e, d)=>{
+      if(!d || !d.fatal) return;
+      if(d.type===Hls.ErrorTypes.NETWORK_ERROR) { try{hls.startLoad()}catch{} }
+      else if(d.type===Hls.ErrorTypes.MEDIA_ERROR) { try{hls.recoverMediaError()}catch{} }
+    });
+    hls.loadSource(url); hls.attachMedia(v);
+  }else{
+    // нативный HLS (Safari/iOS): ждём метаданные, раньше play() тоже мимо
+    v.src = url;
+    v.addEventListener("loadedmetadata", ()=>{ v.play().catch(()=>{}) }, {once:true});
+  }
+}
 let PGM_SID=null,PGM_HLS=null,MV_PGM_ATTACHING=false;
 function programSelect(sid){
   PGM_SID=sid;localStorage.setItem("pgmSid",String(sid));
@@ -2178,9 +2207,8 @@ function programAttach(sid){
     if(window.Hls&&Hls.isSupported()){
       PGM_HLS=new Hls({liveDurationInfinity:true,liveSyncDurationCount:4,
         liveMaxLatencyDurationCount:15,maxLiveSyncPlaybackRate:1.5,maxBufferLength:30});
-      PGM_HLS.loadSource(mvUrl(s));PGM_HLS.attachMedia(v);
-    }else{v.src=mvUrl(s)}
-    v.play().catch(()=>{});
+    }
+    hlsAttach(PGM_HLS, v, mvUrl(s));
   }).catch(()=>{}).finally(()=>{MV_PGM_ATTACHING=false});
 }
 function pgmStop(){
@@ -2298,10 +2326,9 @@ function obsPreviewStart(streamid){
     if(OBS_PREVIEW_SID!==streamid)return;   // успели отключить, пока грузился hls.js
     if(window.Hls&&Hls.isSupported()){
       OBS_PREVIEW_HLS=new Hls({liveDurationInfinity:true,liveSyncDurationCount:3,maxBufferLength:10});
-      OBS_PREVIEW_HLS.loadSource(url);OBS_PREVIEW_HLS.attachMedia(v);
-    }else{v.src=url}
+    }
     v.style.display="";$("#obsPreviewOff").style.display="none";
-    v.play().catch(()=>{});
+    hlsAttach(OBS_PREVIEW_HLS, v, url);
   }).catch(()=>{});
 }
 function obsPreviewStop(){
@@ -2392,9 +2419,8 @@ async function playerOpen(sid){
       HLS_OBJ=new Hls({liveDurationInfinity:true,
         liveSyncDurationCount:4, liveMaxLatencyDurationCount:15,
         maxLiveSyncPlaybackRate:1.5, maxBufferLength:30});
-      HLS_OBJ.loadSource(url);HLS_OBJ.attachMedia(v);
-    }else{v.src=url}
-    v.play().catch(()=>{});
+    }
+    hlsAttach(HLS_OBJ, v, url);
   }catch(e){$("#plUrl").textContent=TT("Не удалось загрузить hls.js")+" — "+url}
 }
 function playerClose(){
