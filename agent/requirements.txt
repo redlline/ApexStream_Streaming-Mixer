@@ -1,0 +1,6 @@
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+python-multipart==0.0.20
+pyzmq==26.*
+playwright==1.*
+Pillow>=10

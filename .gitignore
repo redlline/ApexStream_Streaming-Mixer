@@ -1,0 +1,23 @@
+# --- секреты и данные (НИКОГДА не коммитить) ---
+*.env
+.apikey
+*.db
+agent/data/
+ui/data/
+ui-data/
+
+# --- служебное ---
+__pycache__/
+*.pyc
+.deploy_ts/
+
+# --- рабочие скриншоты и заметки, не относящиеся к коду ---
+*.jpg
+*.jpeg
+*.png
+!docs/**/*.png
+flussonic_mark2.txt
+
+# Старая инструкция (заменена на README.md + docs/API.md). Не публикуем:
+# внутри скриншоты панели с внутренними адресами.
+docs/Belet_Ad_Streamer_Instrukciya.pdf

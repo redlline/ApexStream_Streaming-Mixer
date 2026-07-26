@@ -1,0 +1,20 @@
+<div style="width:1920px;height:270px;box-sizing:border-box;padding:0 192px;
+  display:flex;align-items:flex-end;font-family:'Arial','Liberation Sans',sans-serif">
+  <div style="overflow:hidden;border-radius:6px;box-shadow:0 10px 34px rgba(0,0,0,.55);
+    animation:l3wipe .6s cubic-bezier(.2,.8,.2,1) both">
+    <div style="display:flex;align-items:stretch">
+      <div style="width:12px;background:#e50914"></div>
+      <div style="background:linear-gradient(90deg,rgba(12,16,28,.96),rgba(12,16,28,.8));
+        padding:16px 48px 16px 26px;min-width:520px">
+        <div style="font:800 42px/1.1 Arial;color:#fff;letter-spacing:.5px;overflow:hidden">
+          <span style="display:inline-block;animation:l3up .5s .28s both">ИМЯ ФАМИЛИЯ</span></div>
+        <div style="font:500 23px Arial;color:#ffd23f;margin-top:5px;overflow:hidden">
+          <span style="display:inline-block;animation:l3up .5s .4s both">Должность · комментарий</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<style>
+@keyframes l3wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@keyframes l3up{from{opacity:0;transform:translateY(115%)}to{opacity:1;transform:translateY(0)}}
+</style>
