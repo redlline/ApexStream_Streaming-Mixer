@@ -144,6 +144,10 @@ class StreamG:
         self.video_busy = False               # идёт вставка ролика
         self.video_refs = None
         self.stopping = False
+        # команды control-сокета выполняются строго по одной (движок к
+        # параллельным не готов); сами соединения при этом обслуживаются
+        # каждое в своём потоке — см. _control_handle
+        self.ctl_lock = threading.Lock()
         self.last_error = None
         # ---- звук: громкость выхода/ролика + VU-метры (UI слева от PGM)
         self.last_levels = {"out_rms": -100.0, "ad_rms": -100.0, "mic_rms": -100.0, "obs_rms": -100.0}
@@ -1772,34 +1776,107 @@ class StreamG:
 
     # ---------------- control-сокет (движок): команды от агента
     def _control_server(self):
-        try:
-            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind(("127.0.0.1", self.control_port))
-            srv.listen(8)
-            srv.settimeout(1.0)
-        except Exception as e:
-            print(f"[streamG] control-сокет не поднялся: {e}", flush=True)
-            return
-        print(f"[streamG] control на 127.0.0.1:{self.control_port}", flush=True)
+        """Внешний цикл: поднимает слушающий сокет и ПЕРЕПОДНИМАЕТ его, если тот
+        умер. Это единственный канал управления живым потоком (баннер, лого,
+        ролик, OBS, смена входа) — а эфирный конвейер к нему не привязан и
+        продолжает вещать сам по себе. Поэтому тихая смерть этого потока даёт
+        худший вид отказа: зритель видит нормальную картинку, а поток при этом
+        полностью потерян для оператора, и заметно это только когда кто-то
+        нажмёт кнопку. Так уже случалось на проде: процесс жив, кадры идут,
+        а порт не слушает никто.
+
+        Раньше здесь был безусловный `except OSError: break` без единой строки
+        в лог — одна случайная ошибка accept() убивала управление навсегда.
+        Теперь транзиентные ошибки переживаются, а если умер сам слушающий
+        сокет — он пересоздаётся."""
+        backoff = 1.0
+        while not self.stopping:
+            srv = None
+            try:
+                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind(("127.0.0.1", self.control_port))
+                srv.listen(8)
+                srv.settimeout(1.0)
+                print(f"[streamG] control на 127.0.0.1:{self.control_port}", flush=True)
+                backoff = 1.0          # подняли успешно — сбрасываем задержку
+                self._control_accept_loop(srv)
+            except Exception as e:
+                if self.stopping:
+                    break
+                print(f"[streamG] control-сокет упал ({e}) — переподнимаю "
+                      f"через {backoff:.0f}с", flush=True)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 15.0)
+            finally:
+                if srv is not None:
+                    try:
+                        srv.close()
+                    except Exception:
+                        pass
+        print("[streamG] control остановлен", flush=True)
+
+    def _control_accept_loop(self, srv):
+        """Приём соединений. Выходит нормально по self.stopping, а исключение
+        наверх бросает только когда слушающий сокет действительно негоден —
+        внешний цикл его пересоздаст."""
+        transient = 0
         while not self.stopping:
             try:
                 conn, _ = srv.accept()
+                transient = 0
             except socket.timeout:
                 continue
-            except OSError:
-                break
+            except OSError as e:
+                if self.stopping:
+                    return
+                # ECONNABORTED (клиент отвалился до accept), EINTR, EMFILE
+                # (кончились дескрипторы) — сам слушающий сокет при этом жив,
+                # не состоялось только одно соединение. Раньше любая из них
+                # означала конец управления потоком.
+                transient += 1
+                print(f"[streamG] control accept: {e} "
+                      f"(подряд {transient})", flush=True)
+                if transient >= 5:
+                    raise                 # похоже, негоден сам сокет — пересоздать
+                time.sleep(0.2)
+                continue
+            # Обработка — в ОТДЕЛЬНОМ потоке, иначе один клиент, который
+            # подключился и замолчал, держит accept-цикл и блокирует всё
+            # управление потоком (проверено: команды переставали проходить).
+            # Таймаута на соединении для этого мало — он лишь ограничивает
+            # зависание сверху, а блокировать приём не перестаёт.
+            threading.Thread(target=self._control_handle, args=(conn,),
+                             daemon=True).start()
+
+    def _control_handle(self, conn):
+        """Одно соединение. recv() — ДО взятия ctl_lock: молчащий клиент ждёт
+        данные в своём потоке и никому не мешает. Сам _dispatch по-прежнему
+        выполняется строго последовательно (движок к параллельным командам не
+        готов) — параллелится только ожидание сети."""
+        try:
+            conn.settimeout(15.0)
+            data = conn.recv(8192).decode("utf-8", "replace").strip()
+            with self.ctl_lock:
+                reply = self._dispatch(data)
+            conn.sendall((reply + "\n").encode())
+        except (ConnectionResetError, BrokenPipeError, socket.timeout):
+            # клиент оборвал соединение или промолчал — штатная ситуация, к
+            # состоянию движка отношения не имеет. В лог не пишем: при флуде
+            # обрывов такие строки вытесняют из журнала действительно полезные
+            # (проверено стресс-тестом — 77 строк за один прогон).
+            pass
+        except Exception as e:
+            print(f"[streamG] control: ошибка обработки команды: {e}", flush=True)
             try:
-                data = conn.recv(8192).decode("utf-8", "replace").strip()
-                conn.sendall((self._dispatch(data) + "\n").encode())
-            except Exception as e:
-                try:
-                    conn.sendall(f"ERR {e}\n".encode())
-                except Exception:
-                    pass
-            finally:
+                conn.sendall(f"ERR {e}\n".encode())
+            except Exception:
+                pass
+        finally:
+            try:
                 conn.close()
-        srv.close()
+            except Exception:
+                pass
 
     def _dispatch(self, line):
         p = line.split()
