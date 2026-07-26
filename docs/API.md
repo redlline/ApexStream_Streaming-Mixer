@@ -94,10 +94,16 @@ curl -s -X POST $A/api/streams/1/playhtml -H "X-API-Key: $KEY" \
 агента) и `{id}` (ваш streamid):
 
 ```json
-{"enabled":true,"running":true,"srt_port":8890,
+{"enabled":true,"running":true,"srt_port":8890,"rtsp_port":8554,
  "publish_tpl":"srt://{host}:8890?streamid=publish:{id}",
- "input_tpl":"srt://127.0.0.1:8890?streamid=read:{id}"}
+ "input_tpl":"rtsp://127.0.0.1:8554/{id}"}
 ```
+
+Энкодер пушит по **SRT**, а поток читается из MediaMTX по **RTSP**. Так
+сделано намеренно: SRT-выход MediaMTX отдаёт не всякий кодек, и вещательный
+MPEG-2 (обычное дело для Astra и аппаратных энкодеров) по нему не читается —
+путь заводится и числится `ready`, но чтение падает с `Input/output error`.
+По RTSP тот же поток читается нормально, H.264 тоже.
 
 ---
 
@@ -153,15 +159,27 @@ curl -s $A/api/srtpush/info -H "X-API-Key: $KEY"
 # 2) в энкодере указать (streamid придумываете сами):
 #    srt://10.0.0.10:8890?streamid=publish:astra1
 
-# 3) создать поток с таким входом:
+# 3) создать поток, читающий этот путь из MediaMTX по RTSP:
 curl -s -X POST $A/api/streams -H "X-API-Key: $KEY" \
      -F "name=Канал с Astra" \
-     -F "input_url=srt://127.0.0.1:8890?streamid=read:astra1"
+     -F "input_url=rtsp://127.0.0.1:8554/astra1"
 ```
 
-Обратите внимание: в энкодере — адрес **сервера** и `publish:`, во входе
-потока — `127.0.0.1` и `read:`. `streamid` в обеих строках одинаковый.
-Допустимы латиница, цифры, дефис и подчёркивание.
+`streamid` в энкодере и имя пути во входе совпадают. Допустимы латиница,
+цифры, дефис и подчёркивание.
+
+Проверить, что энкодер реально достучался:
+
+```bash
+curl -s http://127.0.0.1:9997/v3/paths/list | python3 -m json.tool
+```
+
+Путь должен быть в списке с `"ready": true`. Поле `tracks` покажет кодеки —
+полезно, если картинка потом не пойдёт.
+
+> Если в `tracks` значится `MPEG-1/2 Video`, читайте только по RTSP. Через
+> SRT такой поток из MediaMTX не выйдет, а через HLS вернётся ошибка 500 —
+> оба формата требуют H.264.
 
 ---
 

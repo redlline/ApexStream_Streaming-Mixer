@@ -1546,13 +1546,22 @@ def srtpush_info():
     этого агента), {id} вводит оператор."""
     ll = MEDIAMTX_INSTANCES["ll"]
     port = ll["srt_port"]
+    rtsp = ll["rtsp_port"]
     return {"enabled": MEDIAMTX_ENABLED,
             "running": mediamtx_alive("ll"),
             "srt_port": port,
-            # что вбить в Astra (адрес НАШЕГО сервера + publish)
+            "rtsp_port": rtsp,
+            # что вбить в энкодер (адрес НАШЕГО сервера + publish)
             "publish_tpl": f"srt://{{host}}:{port}?streamid=publish:{{id}}",
-            # что подставить в input_url потока (движок рядом с MediaMTX → localhost)
-            "input_tpl": f"srt://127.0.0.1:{port}?streamid=read:{{id}}"}
+            # Что подставить в input_url потока (движок рядом с MediaMTX →
+            # localhost). Читаем по RTSP, а НЕ обратно по SRT: SRT-выход
+            # MediaMTX умеет отдавать не всякий кодек, и вещательный MPEG-2
+            # (обычное дело для Astra и аппаратных энкодеров) он не отдаёт —
+            # путь при этом заводится и числится ready, а чтение падает с
+            # Input/output error. По RTSP тот же поток читается нормально,
+            # H.264 через него идёт так же хорошо. Проверено вживую на
+            # MPEG-2 SD 720x576 с Astra Cesbo.
+            "input_tpl": f"rtsp://127.0.0.1:{rtsp}/{{id}}"}
 
 @app.post("/api/mediamtx/start")
 def mediamtx_start_api():
