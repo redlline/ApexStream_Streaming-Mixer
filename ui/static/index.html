@@ -526,7 +526,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f">кодек<select id="stCodec"><option>h264_nvenc</option><option>libx264</option></select></label>
       <label class="f">битрейт<input id="stBr" value="6000k" style="width:90px"></label>
       <label class="f">автостарт<select id="stAuto"><option value="1">да</option><option value="0">нет</option></select></label>
-      <label class="f">аудиодорожки входа<input id="stAudioTracks" value="0" placeholder="0 или 0,1,2" style="width:110px"></label>
+      <label class="f">аудиодорожки входа<span class="row"><input id="stAudioTracks" value="0" placeholder="0 или 0,1,2" style="width:110px"><button type="button" class="btn gray" onclick="audioTracksDlg('st')">🎚 Дорожки</button></span></label>
       <label class="f"><span>&nbsp;</span><label><input type="checkbox" id="stMtx" checked> отдавать через MediaMTX (RTSP/HLS/SRT/WebRTC)</label></label>
       <button class="btn" onclick="streamAdd()">Добавить</button>
     </div>
@@ -539,7 +539,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <div id="stPushInput" class="muted" style="font-size:11px;margin-top:6px"></div>
     </div>
     <p class="muted" style="margin:6px 0 0">Если выход во Flussonic не нужен (например, поток предназначен только для внешних плееров) — оставьте «исходящий» пустым, включив MediaMTX: ссылки появятся у потока после старта.</p>
-    <p class="muted" style="margin:6px 0 0"><b>Аудиодорожки:</b> одна («0» = первая) — как обычно. Несколько через запятую («0,1,2,3») — <b>мультиязык</b>: все дорожки уходят в MediaMTX по SRT (Flussonic тянет их все по <code>srt://…?streamid=read:sgN</code>), реклама звучит одним общим звуком на всех языках. Мультиязык требует включённого MediaMTX. Индексы подбираются перебором (0, 1, 2… по звуку).</p>
+    <p class="muted" style="margin:6px 0 0"><b>Аудиодорожки:</b> <b>первый номер уходит в эфир</b> — если провайдер ставит первой служебную дорожку (интершум, чистый звук стадиона), укажите здесь номер нужной, например «1». Кнопка «🎚 Дорожки» покажет, что реально отдаёт источник, с языками — угадывать номера не нужно. Несколько через запятую («1,0,2») — <b>мультиязык</b>: первая в эфир, остальные уходят в MediaMTX по SRT дополнительными дорожками (Flussonic тянет их все по <code>srt://…?streamid=read:sgN</code>), реклама звучит одним общим звуком на всех языках. Мультиязык требует включённого MediaMTX.</p>
     <p id="stInCheck" class="muted" style="margin:6px 0 0"></p>
   </div>
   <div class="card"><h3>Потоки</h3>
@@ -744,6 +744,25 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
   </div>
 </dialog>
 
+<dialog id="audioTracksDlg">
+  <div style="padding:20px;display:flex;flex-direction:column;gap:10px;min-width:420px;max-width:620px">
+    <h3 style="margin:0">Аудиодорожки источника</h3>
+    <p class="muted" style="margin:0">Провайдеры часто ставят первой не ту дорожку, что нужна в эфир (например, интершум перед речью). Здесь видно, что реально отдаёт источник — выберите, какая дорожка идёт <b>в эфир</b>.</p>
+    <div class="row" style="gap:6px;align-items:flex-end">
+      <label class="f" style="flex:1">URL источника<input id="atUrl" style="width:100%" placeholder="srt://... | http://..."></label>
+      <button class="btn" onclick="audioTracksProbe()">Проверить</button>
+    </div>
+    <p id="atStatus" class="muted" style="margin:0"></p>
+    <div id="atRows" style="display:flex;flex-direction:column;gap:6px"></div>
+    <p class="muted" style="margin:0;font-size:12px">Отметьте <b>дополнительные</b> дорожки, если нужен мультиязык: они уйдут в MediaMTX отдельными дорожками. Реклама во всех языках звучит одним общим звуком.</p>
+    <p id="atResult" class="muted" style="margin:0;font-family:ui-monospace,monospace"></p>
+    <div class="row" style="justify-content:flex-end;gap:6px">
+      <button class="btn gray" onclick="$('#audioTracksDlg').close()">Отмена</button>
+      <button class="btn" onclick="audioTracksApply()">Применить</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="streamEditDlg">
   <form method="dialog" style="padding:20px;display:flex;flex-direction:column;gap:10px;min-width:340px">
     <h3 style="margin:0">Редактировать поток</h3>
@@ -760,7 +779,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f">кодек<select id="seCodec"><option>h264_nvenc</option><option>libx264</option></select></label>
       <label class="f">битрейт<input id="seBr" style="width:90px"></label>
       <label class="f">автостарт<select id="seAuto"><option value="1">да</option><option value="0">нет</option></select></label>
-      <label class="f">аудиодорожки входа (0 или 0,1,2)<input id="seAudioTracks" placeholder="0 или 0,1,2" style="width:110px"></label>
+      <label class="f">аудиодорожки входа (0 или 0,1,2)<span class="row"><input id="seAudioTracks" placeholder="0 или 0,1,2" style="width:110px"><button type="button" class="btn gray" onclick="audioTracksDlg('se')">🎚 Дорожки</button></span></label>
     </div>
     <label class="f"><span>&nbsp;</span><label><input type="checkbox" id="seMtx"> отдавать через MediaMTX (RTSP/HLS/SRT/WebRTC)</label></label>
     <p class="muted" style="margin:0">Без выхода во Flussonic (поле пустое) обязательно включите MediaMTX — иначе потоку некуда публиковаться.</p>
@@ -1679,6 +1698,71 @@ async function cloneStream(sid){
   const r=await api("streams",{method:"POST",body:fd});
   await loadStreams();
   streamEditOpen(r.id);   // сразу открыть на редактирование — задать выход/имя
+}
+// ---- выбор аудиодорожек источника.
+// В audio_tracks порядок ЗНАЧИМ: первая позиция уходит в эфир, остальные —
+// дополнительные языки мультиязыка. Раньше номера приходилось угадывать
+// вслепую, и если провайдер ставил первой служебную дорожку (интершум), в
+// эфир шла именно она. Здесь оператор видит реальный состав источника.
+let AT_TARGET="st", AT_TRACKS=[];
+function audioTracksDlg(target){
+  AT_TARGET=target; AT_TRACKS=[];
+  // подставляем URL того же потока, что редактируется
+  const url = target==="se" ? $("#seIn").value
+            : ($("#stInMode") && $("#stInMode").value==="push"
+                 ? "" : $("#stIn").value);
+  $("#atUrl").value=(url||"").trim();
+  $("#atStatus").textContent="";$("#atRows").innerHTML="";$("#atResult").textContent="";
+  $("#audioTracksDlg").showModal();
+  if($("#atUrl").value)audioTracksProbe();
+}
+async function audioTracksProbe(){
+  const url=normalizeUrl($("#atUrl").value);
+  if(!url){$("#atStatus").textContent=TT("Укажите URL источника");return}
+  $("#atUrl").value=url;
+  $("#atStatus").textContent=TT("Опрашиваю источник…");
+  $("#atRows").innerHTML="";$("#atResult").textContent="";
+  const fd=new FormData();fd.append("url",url);
+  let r;
+  try{r=await api("probeaudio",{method:"POST",body:fd})}
+  catch(e){$("#atStatus").textContent=TT("Не удалось")+": "+(e.message||e);return}
+  AT_TRACKS=r.tracks||[];
+  if(!AT_TRACKS.length){$("#atStatus").textContent=TT("В источнике нет аудиодорожек");return}
+  $("#atStatus").textContent=TT("Найдено дорожек")+": "+AT_TRACKS.length;
+  // текущее значение поля — чтобы диалог открывался с уже выбранным
+  const cur=((AT_TARGET==="se"?$("#seAudioTracks").value:$("#stAudioTracks").value)||"0")
+              .split(",").map(x=>parseInt(x.trim(),10)).filter(x=>!isNaN(x));
+  const main=cur.length?cur[0]:0;
+  $("#atRows").innerHTML=AT_TRACKS.map(t=>{
+    const lang=t.language?t.language.toUpperCase():"";
+    const desc=[lang,t.title,t.codec,t.channels?t.channels+"ch":""].filter(Boolean).join(" · ");
+    return `<label class="row" style="gap:10px;align-items:center;background:#151b28;border:1px solid var(--line);border-radius:8px;padding:8px 12px">
+      <input type="radio" name="atMain" value="${t.n}" ${t.n===main?"checked":""} onchange="audioTracksRender()">
+      <span style="flex:1"><b>#${t.n}</b>${desc?" — "+esc(desc):""}</span>
+      <label style="display:flex;gap:5px;align-items:center;font-size:12px" class="muted">
+        <input type="checkbox" class="atExtra" value="${t.n}" ${cur.slice(1).includes(t.n)?"checked":""} onchange="audioTracksRender()"> доп. язык
+      </label>
+    </label>`;
+  }).join("");
+  audioTracksRender();
+}
+function audioTracksValue(){
+  const mainEl=document.querySelector('input[name="atMain"]:checked');
+  if(!mainEl)return "";
+  const main=parseInt(mainEl.value,10);
+  const extra=[...document.querySelectorAll(".atExtra:checked")]
+                .map(x=>parseInt(x.value,10)).filter(n=>n!==main);
+  return [main,...extra].join(",");
+}
+function audioTracksRender(){
+  const v=audioTracksValue();
+  $("#atResult").textContent=v?TT("Будет записано")+": "+v:"";
+}
+function audioTracksApply(){
+  const v=audioTracksValue();
+  if(!v){alert(TT("Выберите дорожку для эфира"));return}
+  if(AT_TARGET==="se")$("#seAudioTracks").value=v; else $("#stAudioTracks").value=v;
+  $("#audioTracksDlg").close();
 }
 async function checkInputUrl(inputId,outId){
   const inEl=$("#"+inputId),out=$("#"+outId);

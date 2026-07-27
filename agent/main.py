@@ -1869,6 +1869,48 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
                          mediamtx_enabled, audio_tracks))
     return {"id": cur.lastrowid}
 
+@app.post("/api/probeaudio")
+def probe_audio(url: str = Form(...)):
+    """Аудиодорожки источника: порядковый номер, язык, название, кодек, каналы.
+
+    Нужен панели, чтобы оператор ВИДЕЛ дорожки и выбирал нужную, а не угадывал
+    номера. Частый случай: провайдер отдаёт интершум первой дорожкой, а речь
+    второй — по умолчанию в эфир уходит первая, и получается фон вместо
+    комментария.
+
+    Номер в ответе — порядковый СРЕДИ АУДИОДОРОЖЕК (0, 1, 2…), ровно в том
+    виде, в каком его ждёт audio_tracks у потока, а не абсолютный индекс
+    потока в контейнере."""
+    url = (url or "").strip()
+    if not url:
+        raise HTTPException(400, "укажите URL")
+    if not shutil.which(FFPROBE):
+        raise HTTPException(503, "ffprobe недоступен на сервере")
+    try:
+        p = subprocess.run(
+            [FFPROBE, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_name,channels:stream_tags=language,title",
+             "-of", "json", url],
+            capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "источник не ответил за 25с")
+    if p.returncode != 0:
+        detail = (p.stderr or "").strip().splitlines()
+        raise HTTPException(400, detail[-1] if detail else "источник недоступен")
+    try:
+        streams = json.loads(p.stdout or "{}").get("streams", [])
+    except Exception:
+        raise HTTPException(500, "не разобрал ответ ffprobe")
+    tracks = []
+    for i, s in enumerate(streams):
+        tags = s.get("tags") or {}
+        tracks.append({"n": i,                       # то, что идёт в audio_tracks
+                       "codec": s.get("codec_name") or "",
+                       "channels": s.get("channels"),
+                       "language": (tags.get("language") or "").strip(),
+                       "title": (tags.get("title") or "").strip()})
+    return {"ok": True, "tracks": tracks}
+
 @app.post("/api/checkinput")
 def checkinput(url: str = Form(...)):
     """Проверка произвольного URL (используется формой добавления/правки потока)."""
