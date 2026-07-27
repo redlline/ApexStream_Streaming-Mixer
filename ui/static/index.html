@@ -527,6 +527,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f">битрейт<input id="stBr" value="6000k" style="width:90px"></label>
       <label class="f">автостарт<select id="stAuto"><option value="1">да</option><option value="0">нет</option></select></label>
       <label class="f">аудиодорожки входа<span class="row"><input id="stAudioTracks" value="0" placeholder="0 или 0,1,2" style="width:110px"><button type="button" class="btn gray" onclick="audioTracksDlg('st')">🎚 Дорожки</button></span></label>
+      <label class="f">заглушка при обрыве<select id="stSlate" style="max-width:180px"><option value="0">— без заглушки —</option></select></label>
       <label class="f"><span>&nbsp;</span><label><input type="checkbox" id="stMtx" checked> отдавать через MediaMTX (RTSP/HLS/SRT/WebRTC)</label></label>
       <button class="btn" onclick="streamAdd()">Добавить</button>
     </div>
@@ -922,6 +923,7 @@ async function loadMedia(){
     return `<option value="${b.id}">${esc(b.name)}${m?` (${m[1]}×${m[2]})`:""}</option>`;
   }).join("");
   setOpts($("#gstSlate"),`<option value="0">— без заглушки —</option>`+slateOpts);
+  setOpts($("#stSlate"),`<option value="0">— без заглушки —</option>`+slateOpts);
   setOpts($("#scMedia"),`<option value="q:0">баннеры из очереди</option>`
     +bs.map(b=>`<option value="b:${b.id}">баннер: ${esc(b.name)}</option>`).join("")
     +vs.map(v=>`<option value="v:${v.id}">ролик: ${esc(v.name)}</option>`).join("")
@@ -1673,6 +1675,7 @@ async function streamAdd(){
   fd.append("autostart",$("#stAuto").value);
   fd.append("audio_tracks",$("#stAudioTracks").value||"0");
   fd.append("mediamtx_enabled",$("#stMtx").checked?1:0);
+  fd.append("slate_banner_id",$("#stSlate").value||0);
   await api("streams",{method:"POST",body:fd});
   $("#stInCheck").textContent="";
   loadStreams();
@@ -1695,6 +1698,7 @@ async function cloneStream(sid){
   fd.append("autostart",0);   // клон не должен стартовать сам молча
   fd.append("audio_tracks",s.audio_tracks||"0");
   fd.append("mediamtx_enabled",s.mediamtx_enabled===undefined?1:(s.mediamtx_enabled?1:0));
+  fd.append("slate_banner_id",s.gst_slate_banner_id||0);   // заглушку клон наследует
   const r=await api("streams",{method:"POST",body:fd});
   await loadStreams();
   streamEditOpen(r.id);   // сразу открыть на редактирование — задать выход/имя

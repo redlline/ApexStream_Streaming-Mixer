@@ -1839,7 +1839,8 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
                banner_w: int = Form(1920), banner_h: int = Form(150),
                vcodec: str = Form("h264_nvenc"), vbitrate: str = Form("6000k"),
                fps: int = Form(25), autostart: int = Form(0),
-               mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0")):
+               mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0"),
+               slate_banner_id: int = Form(0)):
     for v, what in ((out_w, "кадр W"), (out_h, "кадр H"),
                     (banner_w, "баннер W"), (banner_h, "баннер H")):
         vnum(v, 16, 4096, what)
@@ -1859,14 +1860,23 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
     if len(parse_audio_tracks(audio_tracks)) > 1 and not (MEDIAMTX_ENABLED and mediamtx_enabled):
         raise HTTPException(400, "мультиязык (несколько аудиодорожек) требует "
                                  "включённой отдачи через MediaMTX")
+    # заглушка на долгий срыв провайдера — раньше её можно было задать только
+    # ОТДЕЛЬНЫМ действием после создания потока, и про неё легко было забыть:
+    # поток уходил в эфир, а при первом же обрыве зритель видел чёрный экран
+    # вместо картинки. Работает независимо от галочки буфера.
+    if slate_banner_id:
+        with closing(db()) as c:
+            if not c.execute("SELECT 1 FROM banners WHERE id=?",
+                             (slate_banner_id,)).fetchone():
+                raise HTTPException(404, "заглушка: баннер не найден")
     with closing(db()) as c, c:
         cur = c.execute("""INSERT INTO streams(name,input_url,output_url,out_w,out_h,
                            banner_w,banner_h,vcodec,vbitrate,fps,autostart,engine,
-                           mediamtx_enabled,audio_tracks)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'gstreamer',?,?)""",
+                           mediamtx_enabled,audio_tracks,gst_slate_banner_id)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'gstreamer',?,?,?)""",
                         (name, input_url, output_url, out_w, out_h,
                          banner_w, banner_h, vcodec, vbitrate, fps, autostart,
-                         mediamtx_enabled, audio_tracks))
+                         mediamtx_enabled, audio_tracks, slate_banner_id or None))
     return {"id": cur.lastrowid}
 
 @app.post("/api/probeaudio")
