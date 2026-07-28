@@ -1618,6 +1618,32 @@ function normalizeUrl(v){
   if(/^[a-z][a-z0-9+.-]*:\/\//i.test(v))return v;    // валидная схема (http/https/rtsp/srt/…) — не трогаем
   return v.startsWith("//")?"http:"+v:"http://"+v;   // совсем без схемы — bare domain → http
 }
+// Ссылку на YouTube легко по привычке вставить в обычное поле входа — движок
+// туда ходить не умеет, и раньше это выяснялось только при старте потока, да
+// ещё и невнятной ошибкой. Распознаём сразу и переключаем тип входа сами
+// (такая же защита есть на агенте — для тех, кто дёргает API напрямую).
+const YT_LINK_RE=/^https?:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
+function isYtLink(v){return YT_LINK_RE.test((v||"").trim())}
+function stCatchYtLink(){
+  const el=$("#stIn"); if(!el||!isYtLink(el.value))return;
+  const url=el.value.trim();
+  el.value="";
+  $("#stInMode").value="yt";
+  $("#stInYt").value=url;
+  stInModeChange();
+  $("#stInCheck").textContent=TT("Похоже на YouTube — переключил тип входа на «YouTube-трансляция»");
+}
+function seCatchYtLink(){
+  const el=$("#seIn"); if(!el||!isYtLink(el.value))return;
+  $("#seYt").value=el.value.trim();
+  el.value="";
+  $("#seInCheck").textContent=TT("Ссылка перенесена в поле YouTube — обычный вход для неё не подходит");
+}
+function wireYtCatch(){
+  const st=$("#stIn"), se=$("#seIn");
+  if(st){st.addEventListener("blur",stCatchYtLink);st.addEventListener("paste",()=>setTimeout(stCatchYtLink,0))}
+  if(se){se.addEventListener("blur",seCatchYtLink);se.addEventListener("paste",()=>setTimeout(seCatchYtLink,0))}
+}
 function wireUrlNormalize(id){
   const el=$("#"+id);
   if(!el)return;
@@ -1626,6 +1652,7 @@ function wireUrlNormalize(id){
   el.addEventListener("paste",()=>setTimeout(fix,0));
 }
 ["stIn","seIn","csUrl"].forEach(wireUrlNormalize);
+wireYtCatch();
 // ---- вход по SRT-push: внешний энкодер (Astra Cesbo и т.п.) умеет только
 // SRT-caller, то есть пушит НАМ, а слушать должны мы. Приёмник — MediaMTX
 // агента: он уже слушает SRT и заводит путь сам по streamid=publish:<имя>,

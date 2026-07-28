@@ -618,6 +618,11 @@ YT_RELAY_BIN = os.environ.get("YT_RELAY_BIN", "/usr/local/bin/yt-relay.sh")
 YT_RELAYS = {}            # sid -> процесс релея
 YT_RELAY_LOCK = threading.Lock()
 
+YT_LINK_RE = re.compile(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", re.I)
+
+def is_yt_link(url):
+    return bool(YT_LINK_RE.match((url or "").strip()))
+
 def yt_path(sid):
     """Путь в MediaMTX, куда релей публикует поток этого канала."""
     return f"yt{sid}"
@@ -1970,6 +1975,11 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
     # YouTube временная и в input_url жить не может (см. yt_relay_start).
     # Реальный адрес подставляем сразу после INSERT, когда известен id.
     yt_url = (yt_url or "").strip()
+    # ссылку на YouTube вставили в обычное поле входа — распознаём сами. Иначе
+    # поток молча создавался бы нерабочим: движок не умеет ходить на youtube.com
+    # напрямую, и оператор увидел бы невнятную ошибку только при старте.
+    if not yt_url and is_yt_link(input_url):
+        yt_url = input_url.strip()
     if yt_url:
         if not re.match(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", yt_url, re.I):
             raise HTTPException(400, "ссылка должна быть на youtube.com или youtu.be")
@@ -2121,6 +2131,10 @@ def stream_edit(sid: int, name: str = Form(...), input_url: str = Form(...),
     # yt_url не передали вовсе (старый клиент) — оставляем как было; передали
     # пустым — источник YouTube снимается, вход снова обычный
     yt_url = old["yt_url"] if yt_url is None else (yt_url or "").strip()
+    # ссылку на YouTube вписали в обычное поле входа — распознаём сами
+    # (см. такую же защиту в stream_add)
+    if not yt_url and is_yt_link(input_url):
+        yt_url = input_url.strip()
     if yt_url:
         if not re.match(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", yt_url, re.I):
             raise HTTPException(400, "ссылка должна быть на youtube.com или youtu.be")
