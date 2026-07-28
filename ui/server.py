@@ -279,7 +279,7 @@ async def users_pw(uid: int, request: Request):
     return {"ok": True}
 
 @app.get("/users/stats")
-def users_stats(request: Request):
+def users_stats(request: Request, q: str = ""):
     require_admin(request)
     with closing(db()) as c:
         sessions = [dict(r) for r in c.execute(
@@ -292,9 +292,45 @@ def users_stats(request: Request):
                       SUM(CAST((julianday(s.last_seen)-julianday(s.login_at))*86400 AS INTEGER)) total
                FROM sessions s JOIN users u ON u.id=s.user_id
                GROUP BY u.username ORDER BY total DESC""")]
-        actions = [dict(r) for r in c.execute(
-            "SELECT user,ts,method,path FROM audit ORDER BY id DESC LIMIT 100")]
-    return {"sessions": sessions, "totals": totals, "actions": actions}
+        # Поиск идёт по БД, а не по уже отданным строкам: в журнале держится до
+        # 2000 записей, и фильтровать только последние 100 — значит не найти
+        # ровно то, что обычно и ищут (что делал такой-то на прошлой неделе).
+        if q:
+            like = f"%{q.strip()}%"
+            actions = [dict(r) for r in c.execute(
+                """SELECT user,ts,method,path FROM audit
+                   WHERE user LIKE ? OR path LIKE ? OR method LIKE ? OR ts LIKE ?
+                   ORDER BY id DESC LIMIT 300""", (like, like, like, like))]
+        else:
+            actions = [dict(r) for r in c.execute(
+                "SELECT user,ts,method,path FROM audit ORDER BY id DESC LIMIT 100")]
+        total_actions = c.execute("SELECT COUNT(*) n FROM audit").fetchone()["n"]
+    return {"sessions": sessions, "totals": totals, "actions": actions,
+            "actions_total": total_actions, "q": q or ""}
+
+@app.delete("/audit")
+def audit_clear(request: Request):
+    """Очистить журнал действий. Само это действие тоже записывается — иначе
+    в журнале не осталось бы следа, что его чистили, и кем."""
+    admin = require_admin(request)
+    with closing(db()) as c, c:
+        n = c.execute("SELECT COUNT(*) n FROM audit").fetchone()["n"]
+        c.execute("DELETE FROM audit")
+    audit(admin["username"], "DELETE", f"/audit (очищено записей: {n})")
+    return {"ok": True, "deleted": n}
+
+@app.delete("/sessions")
+def sessions_clear(request: Request):
+    """Завершить чужие сессии — все, кроме текущей. Свою намеренно не трогаем:
+    админ, нажавший кнопку, не должен выкинуть сам себя из панели посреди
+    работы. Остальные разлогиниваются сразу."""
+    admin = require_admin(request)
+    mine = request.cookies.get("adsid", "")
+    with closing(db()) as c, c:
+        n = c.execute("SELECT COUNT(*) n FROM sessions WHERE sid!=?", (mine,)).fetchone()["n"]
+        c.execute("DELETE FROM sessions WHERE sid!=?", (mine,))
+    audit(admin["username"], "DELETE", f"/sessions (завершено чужих: {n})")
+    return {"ok": True, "deleted": n}
 
 # ---------------- agents (серверы Flussonic)
 @app.get("/agents")

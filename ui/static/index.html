@@ -588,6 +588,8 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f">поток<select id="logStream"></select></label>
       <label class="f"><span>&nbsp;</span><button class="btn gray" onclick="loadLogs()">Обновить</button></label>
       <label class="f"><span>&nbsp;</span><label><input type="checkbox" id="logAuto" checked> автообновление</label></label>
+      <label class="f"><span>&nbsp;</span><button class="btn gray" onclick="logsClear(true)">Очистить лог потока</button></label>
+      <label class="f"><span>&nbsp;</span><button class="btn red" onclick="logsClear(false)">Очистить всё</button></label>
     </div>
     <h3>Лог GStreamer выбранного потока</h3>
     <pre class="logbox" id="procLog"></pre>
@@ -616,11 +618,21 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
     <table><thead><tr><th>Пользователь</th><th>Сессий</th><th>Всего времени</th></tr></thead>
     <tbody id="totalRows"></tbody></table>
   </div>
-  <div class="card"><h3>Последние сессии</h3>
+  <div class="card">
+    <h3 style="display:flex;align-items:center;gap:10px">Последние сессии
+      <button class="btn gray" style="margin-left:auto;padding:3px 10px" onclick="sessionsClear()">Завершить чужие сессии</button></h3>
+    <p class="muted" style="margin-top:0">Завершение разлогинивает всех, кроме вас — пригодится, если чей-то ноутбук остался открытым или ушёл сотрудник.</p>
     <table><thead><tr><th>Пользователь</th><th>Вход</th><th>Последняя активность</th><th>Длительность</th></tr></thead>
     <tbody id="sessionRows"></tbody></table>
   </div>
-  <div class="card"><h3>Журнал действий</h3>
+  <div class="card">
+    <h3 style="display:flex;align-items:center;gap:10px">Журнал действий
+      <span id="auditCount" class="muted" style="font-size:12px;font-weight:400"></span>
+      <button class="btn red" style="margin-left:auto;padding:3px 10px" onclick="auditClear()">Очистить журнал</button></h3>
+    <div class="row" style="margin-bottom:8px">
+      <label class="f" style="flex:1;min-width:240px">поиск<input id="auditQ" placeholder="логин, действие или дата — например: admin, /streams, 2026-07-29" style="width:100%" oninput="auditSearchLater()"></label>
+      <label class="f"><span>&nbsp;</span><button class="btn gray" onclick="$('#auditQ').value='';auditSearch()">Сбросить</button></label>
+    </div>
     <table><thead><tr><th>Когда</th><th>Кто</th><th>Действие</th></tr></thead>
     <tbody id="auditRows"></tbody></table>
   </div>
@@ -2037,6 +2049,16 @@ function colorize(line){
   if(l.includes("warn"))return`<span class="lg-warn">${esc(line)}</span>`;
   return esc(line);
 }
+async function logsClear(onlyStream){
+  // буферы кольцевые и живут в памяти агента — на эфир очистка не влияет,
+  // но после долгой отладки полезное тонет в старом шуме
+  const sid=onlyStream?($("#logStream").value||0):0;
+  if(onlyStream&&!sid)return alert(TT("Выберите поток"));
+  const what=onlyStream?TT("лог выбранного потока"):TT("события агента и логи всех потоков");
+  if(!confirm(TT("Очистить")+" "+what+"?"))return;
+  await api(`logs?stream_id=${sid}`,{method:"DELETE"});
+  loadLogs();
+}
 async function loadLogs(){
   const sid=$("#logStream").value||0;
   const d=await api(`logs?stream_id=${sid}&limit=300`);
@@ -2066,8 +2088,42 @@ async function loadUsers(){
   $("#sessionRows").innerHTML=stats.sessions.map(s=>`<tr><td>${esc(s.username)}</td>
     <td class="muted">${s.login_at.replace("T"," ")}</td><td class="muted">${s.last_seen.replace("T"," ")}</td>
     <td>${fmtDur(s.dur)}</td></tr>`).join("");
-  $("#auditRows").innerHTML=stats.actions.map(a=>`<tr><td class="muted">${a.ts.replace("T"," ")}</td>
-    <td>${esc(a.user)}</td><td class="muted">${esc(a.method)} ${esc(a.path)}</td></tr>`).join("");
+  auditRender(stats);
+}
+// ---- журнал действий: поиск идёт на сервере (в БД до 2000 записей, а на
+// экран отдаётся 100 — фильтровать только их значит не найти ровно то, что
+// обычно и ищут: что делал такой-то на прошлой неделе)
+let AUDIT_TIMER=null;
+function auditSearchLater(){clearTimeout(AUDIT_TIMER);AUDIT_TIMER=setTimeout(auditSearch,350)}
+async function auditSearch(){
+  const q=($("#auditQ").value||"").trim();
+  try{
+    const stats=await req("/users/stats"+(q?"?q="+encodeURIComponent(q):""));
+    auditRender(stats);
+  }catch{}
+}
+function auditRender(stats){
+  const rows=stats.actions||[];
+  $("#auditRows").innerHTML=rows.length
+    ? rows.map(a=>`<tr><td class="muted">${a.ts.replace("T"," ")}</td>
+        <td>${esc(a.user)}</td><td class="muted">${esc(a.method)} ${esc(a.path)}</td></tr>`).join("")
+    : `<tr><td colspan="3" class="muted">${TT("ничего не найдено")}</td></tr>`;
+  const c=$("#auditCount");
+  if(c)c.textContent=stats.q
+    ? `${TT("найдено")}: ${rows.length} ${TT("из")} ${stats.actions_total}`
+    : `${TT("всего записей")}: ${stats.actions_total??rows.length}`;
+}
+async function auditClear(){
+  if(!confirm(TT("Очистить журнал действий? Записи будут удалены безвозвратно.")))return;
+  const r=await req("/audit",{method:"DELETE"});
+  alert(TT("Удалено записей")+": "+r.deleted);
+  $("#auditQ").value="";loadUsers();
+}
+async function sessionsClear(){
+  if(!confirm(TT("Завершить все сессии, кроме вашей? Остальные пользователи будут разлогинены.")))return;
+  const r=await req("/sessions",{method:"DELETE"});
+  alert(TT("Завершено сессий")+": "+r.deleted);
+  loadUsers();
 }
 async function userAdd(){
   await req("/users",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -3094,7 +3150,89 @@ const I18N_TM={
 "автопереключение":"awtogeçiş",
 "Если текущий вход молчит дольше 20с — автоматически переключаемся на следующий пресет по кругу, пока не найдётся рабочий.":"Häzirki giriş 20 sekuntdan köp dymsa — awtomatiki usulda indiki presete geçýäris, aýlaw boýunça, işleýän tapylýança.",
 "разместить вручную на превью (перетащить/растянуть)":"öňünden görnüşde eliň bilen ýerleşdir (süýrä/uzalt)",
-"В эфир":"Efire","Применить":"Ulan"
+"В эфир":"Efire","Применить":"Ulan",
+"ID канала OBS (streamid, тот же что указали в OBS при публикации на MediaMTX):":"OBS kanalyň ID-si (streamid — MediaMTX-e çykaranyňyzda OBS-de görkezeniňiz):",
+"MediaMTX сейчас не запущен":"MediaMTX häzir işlemeýär",
+"streamid: только латиница, цифры, дефис и подчёркивание":"streamid: diňe latyn harplary, sanlar, defis we aşaky çyzyk",
+"Будет записано":"Ýazyljak",
+"В источнике нет аудиодорожек":"Çeşmede ses ýollary ýok",
+"Вставьте ссылку на YouTube-трансляцию":"YouTube ýaýlymynyň salgysyny goýuň",
+"Вход потока будет":"Ýaýlymyň girişi şeýle bolar",
+"Выберите дорожку для эфира":"Efir üçin ses ýoluny saýlaň",
+"Выберите поток":"Ýaýlymy saýlaň",
+"Для YouTube нужна отдача через MediaMTX — через неё идёт релей":"YouTube üçin MediaMTX arkaly çykyş gerek — releý şonuň üsti bilen işleýär",
+"Завершено сессий":"Tamamlanan sessiýalar",
+"Завершить все сессии, кроме вашей? Остальные пользователи будут разлогинены.":"Öz sessiýaňyzdan başga ählisi tamamlansynmy? Beýleki ulanyjylar ulgamdan çykarylar.",
+"На этом сервере приём SRT (MediaMTX) выключен":"Bu serwerde SRT kabul etmek (MediaMTX) öçürilen",
+"На этом сервере приём SRT (MediaMTX) выключен — режим push недоступен.":"Bu serwerde SRT kabul etmek (MediaMTX) öçürilen — push tertibi elýeterli däl.",
+"Найдено дорожек":"Tapylan ses ýollary",
+"Не удалось":"Başartmady",
+"Опрашиваю источник…":"Çeşme soralýar…",
+"Очистить журнал действий? Записи будут удалены безвозвратно.":"Hereketler žurnaly arassalansynmy? Ýazgylar hemişelik pozular.",
+"Похоже на YouTube — переключил тип входа на «YouTube-трансляция»":"YouTube salgysyna meňzeýär — giriş görnüşi «YouTube ýaýlymy» diýlip çalşyryldy",
+"Скопировать путь":"Ýoluny göçür",
+"Ссылка должна быть на youtube.com или youtu.be":"Salgy youtube.com ýa-da youtu.be bolmaly",
+"Ссылка перенесена в поле YouTube — обычный вход для неё не подходит":"Salgy YouTube meýdanyna geçirildi — adaty giriş oňa gelişmeýär",
+"Удалено записей":"Pozulan ýazgylar",
+"Укажите URL источника":"Çeşmäniň URL salgysyny giriziň",
+"Укажите streamid — то же имя, что впишете в Astra":"streamid giriziň — Astra-da ýazjak adyňyz bilen deň bolmaly",
+"всего записей":"jemi ýazgy",
+"из":"/",
+"лог выбранного потока":"saýlanan ýaýlymyň logy",
+"лого":"logo",
+"найдено":"tapyldy",
+"ничего не найдено":"hiç zat tapylmady",
+"скопировано":"göçürildi",
+"события агента и логи всех потоков":"agentiň wakalary we ähli ýaýlymlaryň loglary",
+"у этого входа запомнен логотип":"bu giriş üçin logotip ýatda saklandy",
+"OBS-наложение":"OBS gatlagy",
+"URL источника":"Çeşmäniň URL salgysy",
+"YouTube-трансляция":"YouTube ýaýlymy",
+"streamid (задаёте сами)":"streamid (özüňiz belleýärsiňiz)",
+"Аудиодорожки источника":"Çeşmäniň ses ýollary",
+"Завершить чужие сессии":"Başgalaryň sessiýalaryny tamamla",
+"Очистить всё":"Ählisini arassala",
+"Очистить журнал":"Žurnaly arassala",
+"Очистить лог потока":"Ýaýlymyň logyny arassala",
+"Сбросить":"Boşat",
+"Учтите:":"Üns beriň:",
+"в эфир":"efire",
+"дополнительные":"goşmaça",
+"забираем сами (URL провайдера)":"özümiz alýarys (üpjünçiniň URL salgysy)",
+"заглушка при обрыве":"kesilende görkeziljek surat",
+"звук: только OBS (эфир глушится)":"ses: diňe OBS (efir öçürilýär)",
+"звук: только эфир (OBS без звука)":"ses: diňe efir (OBS sessiz)",
+"нам пушат по SRT (Astra/энкодер)":"bize SRT boýunça iberýärler (Astra/enkoder)",
+"нет сигнала":"signal ýok",
+"первый номер уходит в эфир":"ilkinji san efire gidýär",
+"поиск":"gözleg",
+"релей":"releý",
+"ссылка на YouTube":"YouTube salgysy",
+"ссылка на YouTube (пусто = обычный вход)":"YouTube salgysy (boş = adaty giriş)",
+"тип входа":"giriş görnüşi",
+"только просмотр":"diňe görmek",
+"картинка ПРЕВЬЮ в панели (в эфир НЕ идёт)":"panelde ÖŇÜNDEN GÖRNÜŞ suraty (efire GITMEÝÄR)",
+"— как логотип / название —":"— logotip / at ýaly —",
+"⏸ выключить превью":"⏸ öňünden görnüşi öçür",
+"⏸ превью остановлено":"⏸ öňünden görnüş saklandy",
+"⏹ Стоп":"⏹ Sakla",
+"▶ В эфир":"▶ Efire",
+"▶ Старт":"▶ Başlat",
+"▶ включить":"▶ işlet",
+"✕ Отключить":"✕ Öçür",
+"✕ Отмена":"✕ Ýatyr",
+"🎚 Дорожки":"🎚 Ses ýollary",
+"📋 Скопировать":"📋 Göçür",
+"📡 В эфир":"📡 Efire",
+"🔌 Подключить":"🔌 Birikdir",
+"🔴 Показать в эфир":"🔴 Efirde görkez",
+"📰 Бегущая строка":"📰 Ylgaýan setir",
+"📺 Универсальная":"📺 Ählumumy",
+"⚽ Футбол":"⚽ Futbol",
+"🎾 Теннис":"🎾 Tennis",
+"🥊 UFC / бои":"🥊 UFC / söweşler",
+"Завершение разлогинивает всех, кроме вас — пригодится, если чей-то ноутбук остался открытым или ушёл сотрудник.":"Tamamlamak sizden başga ählisini ulgamdan çykarýar — kimdir biriniň noutbugy açyk galan ýa-da işgär giden bolsa peýdaly.",
+"Провайдеры часто ставят первой не ту дорожку, что нужна в эфир (например, интершум перед речью). Здесь видно, что реально отдаёт источник — выберите, какая дорожка идёт":"Üpjünçiler köplenç efire gerek bolmadyk ses ýoluny birinji goýýarlar (mysal üçin, sözden öň meýdanyň sesi). Bu ýerde çeşmäniň hakykatdan näme berýändigi görünýär — haýsy ýoluň gitmelidigini saýlaň"
 };
 let LANG=localStorage.getItem("lang")||"ru";
 function setLang(l){localStorage.setItem("lang",l);location.reload()}

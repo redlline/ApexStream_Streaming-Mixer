@@ -2773,6 +2773,23 @@ def logs(stream_id: int = 0, limit: int = 200):
         events = list(LOG.events)[-limit:]
     return {"process": proc, "events": events}
 
+@app.delete("/api/logs")
+def logs_clear(stream_id: int = 0):
+    """Очистить журнал. stream_id=0 — события агента и вывод ВСЕХ потоков,
+    иначе только вывод указанного потока.
+
+    Зачем: буферы кольцевые (события — 800 строк, вывод потока — 500), и после
+    долгой отладки полезное тонет в старом шуме. Живого эфира это не касается —
+    буферы лежат в памяти агента и на конвейер никак не влияют."""
+    with LOG.lock:
+        if stream_id:
+            LOG.proc.pop(stream_id, None)
+        else:
+            LOG.proc.clear()
+            LOG.events.clear()
+    LOG.event("журнал очищен" + (f" (поток {stream_id})" if stream_id else " (полностью)"))
+    return {"ok": True}
+
 # ---- расписания
 @app.get("/api/schedules")
 def schedules_list():
