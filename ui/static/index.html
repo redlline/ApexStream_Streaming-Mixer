@@ -517,7 +517,9 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f">тип входа<select id="stInMode" onchange="stInModeChange()">
         <option value="pull">забираем сами (URL провайдера)</option>
         <option value="push">нам пушат по SRT (Astra/энкодер)</option>
+        <option value="yt">YouTube-трансляция</option>
       </select></label>
+      <label class="f" id="stInYtWrap" style="display:none">ссылка на YouTube<input id="stInYt" placeholder="https://www.youtube.com/@канал/live" style="width:280px"></label>
       <label class="f" id="stInPullWrap">входящий (от провайдера)<span class="row"><input id="stIn" placeholder="http://provider/stream.m3u8" style="width:260px"><button type="button" class="btn gray" onclick="checkInputUrl('stIn','stInCheck')">Проверить</button></span></label>
       <label class="f" id="stInPushWrap" style="display:none">streamid (задаёте сами)<input id="stInPushId" placeholder="astra1" style="width:160px" oninput="stPushHintRender()"></label>
       <label class="f">исходящий (publish во Flussonic, необязательно)<input id="stOut" placeholder="rtmp://127.0.0.1:1935/live/ch1_ads" style="width:300px"></label>
@@ -538,6 +540,20 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
         <button type="button" class="btn gray" onclick="copyPresetUrl(this,$('#stPushUrl').value)">📋 Скопировать</button>
       </div>
       <div id="stPushInput" class="muted" style="font-size:11px;margin-top:6px"></div>
+    </div>
+    <div id="stYtHint" style="display:none;margin:10px 0 0;padding:10px 12px;background:#151b28;border:1px solid var(--line);border-radius:8px">
+      <div style="font-size:12px;color:var(--mut)">
+        Вставьте ссылку на <b>идущую трансляцию</b> или на канал с суффиксом <code>/live</code> —
+        например <code>https://www.youtube.com/@канал/live</code>. Обычные (не live) видео тоже
+        подхватятся, но смысла в эфире от них немного.<br><br>
+        YouTube не отдаёт постоянный адрес потока: ссылка на него живёт около 6 часов. Поэтому
+        между YouTube и микшером работает <b>релей</b> — он сам переполучает ссылку, когда та
+        протухает. Запускается и останавливается вместе с потоком, следить за ним не нужно.<br><br>
+        <b>Учтите:</b> к задержке эфира прибавится задержка самого YouTube (10–30 секунд),
+        а извлечение потока зависит от <code>yt-dlp</code> — он обновляется автоматически
+        раз в неделю, но при внезапной поломке на стороне YouTube может потребоваться
+        обновить его вручную.
+      </div>
     </div>
     <p class="muted" style="margin:6px 0 0">Если выход во Flussonic не нужен (например, поток предназначен только для внешних плееров) — оставьте «исходящий» пустым, включив MediaMTX: ссылки появятся у потока после старта.</p>
     <p class="muted" style="margin:6px 0 0"><b>Аудиодорожки:</b> <b>первый номер уходит в эфир</b> — если провайдер ставит первой служебную дорожку (интершум, чистый звук стадиона), укажите здесь номер нужной, например «1». Кнопка «🎚 Дорожки» покажет, что реально отдаёт источник, с языками — угадывать номера не нужно. Несколько через запятую («1,0,2») — <b>мультиязык</b>: первая в эфир, остальные уходят в MediaMTX по SRT дополнительными дорожками (Flussonic тянет их все по <code>srt://…?streamid=read:sgN</code>), реклама звучит одним общим звуком на всех языках. Мультиязык требует включённого MediaMTX.</p>
@@ -770,6 +786,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
     <p class="muted" style="margin:0" id="seRunningNote"></p>
     <label class="f">название<input id="seName"></label>
     <label class="f">входящий (от провайдера)<span class="row"><input id="seIn" style="width:260px"><button type="button" class="btn gray" onclick="checkInputUrl('seIn','seInCheck')">Проверить</button></span></label>
+    <label class="f">ссылка на YouTube (пусто = обычный вход)<input id="seYt" placeholder="https://www.youtube.com/@канал/live" style="width:280px"></label>
     <p id="seInCheck" class="muted" style="margin:0"></p>
     <label class="f">исходящий (publish во Flussonic, необязательно)<input id="seOut" style="width:300px"></label>
     <div class="row">
@@ -1451,7 +1468,7 @@ async function loadStreams(){
   $("#streamRows").innerHTML=list.map(s=>{
     const st=s.status||{},run=st.running;
     return `<tr><td>${esc(s.name)}</td>
-      <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${esc(s.input_url)}</td>
+      <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.yt_url||s.input_url)}">${s.yt_url?"▶ YouTube: "+esc(s.yt_url):esc(s.input_url)}</td>
       <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${esc(s.output_url)}</td>
       <td><span class="tag ${run?"ok":"bad"}">${run?'<span class="dot"></span>В ЭФИРЕ':"остановлен"}</span>
           ${st.playing?`<span class="tag warn">баннер ${st.playing_left}c</span>`:""}
@@ -1633,10 +1650,13 @@ function agentSrtHost(){
   try{return new URL(a.url).hostname}catch{return null}
 }
 async function stInModeChange(){
-  const push=$("#stInMode").value==="push";
-  $("#stInPullWrap").style.display=push?"none":"";
+  const mode=$("#stInMode").value;
+  const push=mode==="push", yt=mode==="yt";
+  $("#stInPullWrap").style.display=(push||yt)?"none":"";
   $("#stInPushWrap").style.display=push?"":"none";
   $("#stPushHint").style.display=push?"":"none";
+  $("#stInYtWrap").style.display=yt?"":"none";
+  $("#stYtHint").style.display=yt?"":"none";
   if(push)await stPushHintRender();
 }
 async function stPushHintRender(){
@@ -1653,8 +1673,18 @@ async function stPushHintRender(){
     +(info.running?"":"  ⚠ "+TT("MediaMTX сейчас не запущен"));
 }
 async function streamAdd(){
-  let inputUrl;
-  if($("#stInMode").value==="push"){
+  let inputUrl, ytUrl="";
+  if($("#stInMode").value==="yt"){
+    ytUrl=($("#stInYt").value||"").trim();
+    if(!ytUrl)return alert(TT("Вставьте ссылку на YouTube-трансляцию"));
+    if(!/^https?:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i.test(ytUrl))
+      return alert(TT("Ссылка должна быть на youtube.com или youtu.be"));
+    if(!$("#stMtx").checked)
+      return alert(TT("Для YouTube нужна отдача через MediaMTX — через неё идёт релей"));
+    // вход подставит агент: он указывает на локальный релей, а не на саму
+    // ссылку (она временная и через несколько часов протухает)
+    inputUrl="-";
+  }else if($("#stInMode").value==="push"){
     const id=($("#stInPushId").value||"").trim();
     if(!id)return alert(TT("Укажите streamid — то же имя, что впишете в Astra"));
     // streamid уходит внутрь SRT-URL: пробелы/двоеточия/? поломали бы разбор
@@ -1676,6 +1706,7 @@ async function streamAdd(){
   fd.append("audio_tracks",$("#stAudioTracks").value||"0");
   fd.append("mediamtx_enabled",$("#stMtx").checked?1:0);
   fd.append("slate_banner_id",$("#stSlate").value||0);
+  if(ytUrl)fd.append("yt_url",ytUrl);
   await api("streams",{method:"POST",body:fd});
   $("#stInCheck").textContent="";
   loadStreams();
@@ -1789,6 +1820,7 @@ function streamEditOpen(sid){
   $("#seCodec").value=s.vcodec;$("#seBr").value=s.vbitrate;$("#seAuto").value=s.autostart?"1":"0";
   $("#seAudioTracks").value=s.audio_tracks||"0";
   $("#seMtx").checked=s.mediamtx_enabled===undefined?true:!!s.mediamtx_enabled;
+  $("#seYt").value=s.yt_url||"";
   $("#seInCheck").textContent="";
   const wasRunning=!!s.status?.running;
   $("#seRunningNote").textContent=wasRunning
@@ -1806,6 +1838,9 @@ function streamEditOpen(sid){
     fd.append("autostart",$("#seAuto").value);
     fd.append("audio_tracks",$("#seAudioTracks").value||"0");
     fd.append("mediamtx_enabled",$("#seMtx").checked?1:0);
+    // шлём всегда, в том числе пустым: пусто = снять источник YouTube и
+    // вернуться к обычному входу
+    fd.append("yt_url",($("#seYt").value||"").trim());
     const r=await api(`streams/${sid}`,{method:"PUT",body:fd});
     dlg.close();
     // если поменялся ТОЛЬКО вход — агент сменил его на лету (r.seamless),

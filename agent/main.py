@@ -223,6 +223,15 @@ def init_db():
             # библиотеки) — В ЭФИР НЕ ИДЁТ, в отличие от logo_banner_id.
             # NULL = плитка использует эфирный логотип, а без него — название.
             c.execute("ALTER TABLE streams ADD COLUMN preview_banner_id INTEGER")
+        if "yt_url" not in cols:
+            # ссылка на YouTube-трансляцию. YouTube не отдаёт постоянный адрес
+            # потока: yt-dlp выдаёт ВРЕМЕННУЮ ссылку (живёт ~6 часов), поэтому
+            # держать её в input_url нельзя — эфир упал бы и не поднялся. Здесь
+            # хранится исходная ссылка на канал/трансляцию, а input_url при этом
+            # указывает на локальный релей (см. yt_relay_start): отдельный
+            # процесс переполучает ссылку сам, а поток читает его как обычный
+            # источник.
+            c.execute("ALTER TABLE streams ADD COLUMN yt_url TEXT")
         vcols = [r["name"] for r in c.execute("PRAGMA table_info(videos)")]
         if "gain_db" not in vcols:
             # авто-нормализация громкости ролика (EBU R128-подобный анализ
@@ -594,6 +603,98 @@ def stop_all_mediamtx(user_initiated=False):
     for key in MEDIAMTX_INSTANCES:
         stop_mediamtx(key, user_initiated=user_initiated)
 
+# ---------------------------------------------------------------- YouTube-релей
+# YouTube нельзя подставить прямо во вход потока: yt-dlp отдаёт ВРЕМЕННУЮ
+# ссылку (~6 часов), и после её протухания эфир упал бы и сам не поднялся.
+# Поэтому между YouTube и микшером стоит релей: он переполучает ссылку и гонит
+# поток в MediaMTX, а сам поток читает уже локальный путь как обычный источник.
+# Протухание при этом чинится перезапуском одного релея — поток видит короткий
+# пропал сигнала, показывает заглушку и подхватывает обратно.
+#
+# Следит за релеем сам агент (тот же приём, что и с MediaMTX: _spawn/_kill_group),
+# а НЕ systemd — чтобы Старт/Стоп из панели не требовал давать adstreamer
+# sudo-прав на управление системными юнитами.
+YT_RELAY_BIN = os.environ.get("YT_RELAY_BIN", "/usr/local/bin/yt-relay.sh")
+YT_RELAYS = {}            # sid -> процесс релея
+YT_RELAY_LOCK = threading.Lock()
+
+def yt_path(sid):
+    """Путь в MediaMTX, куда релей публикует поток этого канала."""
+    return f"yt{sid}"
+
+def yt_input_url(sid):
+    """Что подставляется во вход потока. Читаем по RTSP, а не обратно по SRT:
+    SRT-выход MediaMTX отдаёт не всякий кодек (см. srtpush_info)."""
+    return f"rtsp://127.0.0.1:{MEDIAMTX_INSTANCES['ll']['rtsp_port']}/{yt_path(sid)}"
+
+def yt_relay_alive(sid):
+    p = YT_RELAYS.get(sid)
+    return p is not None and p.poll() is None
+
+def yt_relay_start(sid, url):
+    """Поднять релей для потока sid. Идемпотентно: если уже живой — ничего."""
+    if not url:
+        return
+    with YT_RELAY_LOCK:
+        if yt_relay_alive(sid):
+            return
+        if not os.path.exists(YT_RELAY_BIN):
+            LOG.event(f"YouTube-релей не найден ({YT_RELAY_BIN}) — поток {sid} "
+                      f"не получит сигнал")
+            return
+        cmd = [YT_RELAY_BIN, url, yt_path(sid),
+               str(MEDIAMTX_INSTANCES["ll"]["srt_port"])]
+        YT_RELAYS[sid] = _spawn(cmd, sid, "ytrelay")
+        LOG.event(f"YouTube-релей запущен для потока {sid}")
+
+def yt_relay_stop(sid):
+    with YT_RELAY_LOCK:
+        p = YT_RELAYS.pop(sid, None)
+    if p:
+        _kill_group(p)
+        LOG.event(f"YouTube-релей остановлен для потока {sid}")
+
+def yt_ensure_ready(sid, url, timeout=45):
+    """Поднять релей и дождаться, пока поток реально появится в MediaMTX.
+    Возвращает (ok, detail). Ждать обязательно: резолв ссылки через yt-dlp
+    занимает несколько секунд, и до этого пути ещё не существует — обычная
+    проверка входа отвалилась бы с 404 и старт был бы отклонён."""
+    yt_relay_start(sid, url)
+    deadline = time.time() + timeout
+    last = "нет сигнала"
+    while time.time() < deadline:
+        ok, detail = check_input(yt_input_url(sid), timeout=4)
+        if ok:
+            return True, "поток получен"
+        last = detail
+        if not yt_relay_alive(sid):
+            return False, "релей не запустился (проверьте ссылку и журнал потока)"
+        time.sleep(3)
+    return False, f"YouTube не отдал поток за {timeout}с — идёт ли трансляция? ({last})"
+
+def yt_relay_watchdog():
+    """Скрипт релея переживает протухание ссылки сам (внутренний цикл), но если
+    умрёт весь процесс — поднять его снова некому. Поднимаем: релей нужен ровно
+    пока живёт сам поток."""
+    while True:
+        time.sleep(20)
+        try:
+            with closing(db()) as c:
+                rows = c.execute(
+                    "SELECT id, yt_url FROM streams WHERE yt_url IS NOT NULL AND yt_url!=''"
+                ).fetchall()
+            for r in rows:
+                sid = r["id"]
+                m = MIXERS.get(sid)
+                running = bool(m and m.alive())
+                if running and not yt_relay_alive(sid):
+                    LOG.event(f"YouTube-релей потока {sid} упал — поднимаю")
+                    yt_relay_start(sid, r["yt_url"])
+                elif not running and yt_relay_alive(sid):
+                    yt_relay_stop(sid)      # поток остановлен — релей ни к чему
+        except Exception as e:
+            print(f"[ytrelay watchdog] {e}", flush=True)
+
 def ensure_slate_png(src_path):
     """Заглушка (slate) может быть любым загруженным баннером — включая
     анимированный GIF. Раньше движок скармливал ЛЮБОЙ такой файл напрямую в
@@ -739,6 +840,16 @@ class Mixer:
 
     def start(self):
         sid = self.cfg["id"]
+        # YouTube-источник: релей должен работать до старта движка. Здесь это
+        # подстраховка для путей, идущих мимо API (autostart при загрузке
+        # агента, восстановление watchdog'ом) — при обычном старте из панели
+        # релей уже поднят в stream_start. Не роняем старт, если сигнала пока
+        # нет: движок переживает отсутствие входа сам (заглушка + переподключение).
+        _yt = (self.cfg.get("yt_url") or "").strip()
+        if _yt and not yt_relay_alive(sid):
+            ok, detail = yt_ensure_ready(sid, _yt)
+            if not ok:
+                LOG.event(f"[{self.cfg['name']}] YouTube: {detail}", "warning")
         # авто-подстройка fps/битрейта под вход — но НЕ разрешения канваса
         # (out_w/out_h): его оператор уже явно задал в редакторе потока, и
         # оно должно соблюдаться (P1 сам впишет вход любого размера в этот
@@ -784,6 +895,10 @@ class Mixer:
             self.started_at = None
             self.mixer_progress_ts = 0.0
             LOG.event(f"поток '{self.cfg['name']}' остановлен")
+        # релей нужен ровно пока идёт поток — иначе он молча тянул бы трафик с
+        # YouTube и грузил MediaMTX впустую (вне self.lock: _kill_group ждёт
+        # завершения процесса, а лок нужен только для полей микшера)
+        yt_relay_stop(self.cfg["id"])
 
     def alive(self):
         return self.gst_engine is not None and self.gst_engine.poll() is None
@@ -1373,6 +1488,7 @@ def failover_loop():
 threading.Thread(target=watchdog, daemon=True).start()
 threading.Thread(target=failover_loop, daemon=True).start()
 threading.Thread(target=scheduler, daemon=True).start()
+threading.Thread(target=yt_relay_watchdog, daemon=True).start()
 if MEDIAMTX_ENABLED:
     start_all_mediamtx()
 
@@ -1840,7 +1956,7 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
                vcodec: str = Form("h264_nvenc"), vbitrate: str = Form("6000k"),
                fps: int = Form(25), autostart: int = Form(0),
                mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0"),
-               slate_banner_id: int = Form(0)):
+               slate_banner_id: int = Form(0), yt_url: str = Form("")):
     for v, what in ((out_w, "кадр W"), (out_h, "кадр H"),
                     (banner_w, "баннер W"), (banner_h, "баннер H")):
         vnum(v, 16, 4096, what)
@@ -1850,6 +1966,17 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
     if vcodec not in ("h264_nvenc", "libx264"):
         raise HTTPException(400, "кодек: h264_nvenc или libx264")
     output_url = output_url.strip()
+    # YouTube: во входе потока стоит НЕ сама ссылка, а локальный релей — ссылка
+    # YouTube временная и в input_url жить не может (см. yt_relay_start).
+    # Реальный адрес подставляем сразу после INSERT, когда известен id.
+    yt_url = (yt_url or "").strip()
+    if yt_url:
+        if not re.match(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", yt_url, re.I):
+            raise HTTPException(400, "ссылка должна быть на youtube.com или youtu.be")
+        if not (MEDIAMTX_ENABLED and mediamtx_enabled):
+            raise HTTPException(400, "источник YouTube требует включённой "
+                                     "отдачи через MediaMTX — через неё идёт релей")
+        input_url = "-"          # плейсхолдер, заменится ниже на адрес релея
     # выход обязателен, ЕСЛИ поток никуда больше не публикуется — без него и
     # без MediaMTX эфира просто не будет
     if not output_url and not (MEDIAMTX_ENABLED and mediamtx_enabled):
@@ -1872,12 +1999,18 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
     with closing(db()) as c, c:
         cur = c.execute("""INSERT INTO streams(name,input_url,output_url,out_w,out_h,
                            banner_w,banner_h,vcodec,vbitrate,fps,autostart,engine,
-                           mediamtx_enabled,audio_tracks,gst_slate_banner_id)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'gstreamer',?,?,?)""",
+                           mediamtx_enabled,audio_tracks,gst_slate_banner_id,yt_url)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'gstreamer',?,?,?,?)""",
                         (name, input_url, output_url, out_w, out_h,
                          banner_w, banner_h, vcodec, vbitrate, fps, autostart,
-                         mediamtx_enabled, audio_tracks, slate_banner_id or None))
-    return {"id": cur.lastrowid}
+                         mediamtx_enabled, audio_tracks, slate_banner_id or None,
+                         yt_url or None))
+        sid = cur.lastrowid
+        if yt_url:
+            # адрес релея известен только теперь — путь в MediaMTX строится по id
+            c.execute("UPDATE streams SET input_url=? WHERE id=?",
+                      (yt_input_url(sid), sid))
+    return {"id": sid}
 
 @app.post("/api/probeaudio")
 def probe_audio(url: str = Form(...)):
@@ -1979,11 +2112,22 @@ def stream_edit(sid: int, name: str = Form(...), input_url: str = Form(...),
                banner_w: int = Form(1920), banner_h: int = Form(150),
                vcodec: str = Form("h264_nvenc"), vbitrate: str = Form("6000k"),
                fps: int = Form(25), autostart: int = Form(0),
-               mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0")):
+               mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0"),
+               yt_url: str = Form(None)):
     with closing(db()) as c:
         old = c.execute("SELECT * FROM streams WHERE id=?", (sid,)).fetchone()
     if not old:
         raise HTTPException(404, "stream not found")
+    # yt_url не передали вовсе (старый клиент) — оставляем как было; передали
+    # пустым — источник YouTube снимается, вход снова обычный
+    yt_url = old["yt_url"] if yt_url is None else (yt_url or "").strip()
+    if yt_url:
+        if not re.match(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", yt_url, re.I):
+            raise HTTPException(400, "ссылка должна быть на youtube.com или youtu.be")
+        if not (MEDIAMTX_ENABLED and mediamtx_enabled):
+            raise HTTPException(400, "источник YouTube требует включённой "
+                                     "отдачи через MediaMTX — через неё идёт релей")
+        input_url = yt_input_url(sid)      # вход всегда указывает на релей
     for v, what in ((out_w, "кадр W"), (out_h, "кадр H"),
                     (banner_w, "баннер W"), (banner_h, "баннер H")):
         vnum(v, 16, 4096, what)
@@ -2002,10 +2146,21 @@ def stream_edit(sid: int, name: str = Form(...), input_url: str = Form(...),
     with closing(db()) as c, c:
         c.execute("""UPDATE streams SET name=?, input_url=?, output_url=?, out_w=?, out_h=?,
                     banner_w=?, banner_h=?, vcodec=?, vbitrate=?, fps=?, autostart=?, engine='gstreamer',
-                    mediamtx_enabled=?, audio_tracks=?
+                    mediamtx_enabled=?, audio_tracks=?, yt_url=?
                     WHERE id=?""",
                  (name, input_url, output_url, out_w, out_h, banner_w, banner_h,
-                  vcodec, vbitrate, fps, autostart, mediamtx_enabled, audio_tracks, sid))
+                  vcodec, vbitrate, fps, autostart, mediamtx_enabled, audio_tracks,
+                  yt_url or None, sid))
+    # Сменили ссылку — старый релей тянет уже не то, гасим. Если поток в эфире,
+    # сразу поднимаем новый: путь в MediaMTX тот же (yt<id>), поэтому движку
+    # рестарт не нужен — он увидит короткий пропал сигнала и подхватит обратно.
+    # Без немедленного подъёма пришлось бы ждать до 20с очередного тика
+    # watchdog'а, и всё это время в эфире висела бы заглушка.
+    if (old["yt_url"] or "") != (yt_url or ""):
+        yt_relay_stop(sid)
+        _m = MIXERS.get(sid)
+        if yt_url and _m and _m.alive():
+            yt_relay_start(sid, yt_url)
     # Бесшовная смена входа: если поток В ЭФИРЕ и изменился ТОЛЬКО input_url
     # (структурные параметры — размер кадра/баннера, fps, кодек, битрейт, выход,
     # MediaMTX-тумблер — зашиты в пайплайн и требуют полного рестарта), меняем
@@ -2157,9 +2312,19 @@ def input_preset_activate(sid: int, pid: int):
 def stream_start(sid: int):
     guard("запуск потока")
     with closing(db()) as c:
-        row = c.execute("SELECT input_url, output_url, name FROM streams WHERE id=?", (sid,)).fetchone()
+        row = c.execute("SELECT input_url, output_url, name, yt_url FROM streams WHERE id=?",
+                        (sid,)).fetchone()
     if not row:
         raise HTTPException(404, "stream not found")
+    # YouTube: вход указывает на локальный релей, и до его запуска пути ещё нет —
+    # обычная проверка ниже отвалилась бы с 404. Поднимаем релей и ждём сигнала
+    # ПЕРЕД проверкой, а оператору отдаём внятную причину, если не дождались.
+    if (row["yt_url"] or "").strip():
+        ok, detail = yt_ensure_ready(sid, row["yt_url"].strip())
+        if not ok:
+            yt_relay_stop(sid)
+            LOG.event(f"старт потока '{row['name']}' отклонён: {detail}", "error")
+            raise HTTPException(409, f"YouTube: {detail}")
     ok, detail = check_input(row["input_url"])
     if not ok:
         LOG.event(f"старт потока '{row['name']}' отклонён: вход недоступен ({detail})", "error")

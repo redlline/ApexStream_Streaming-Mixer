@@ -1,0 +1,17 @@
+[Unit]
+# YouTube ломает извлечение потоков несколько раз в год — yt-dlp обновляется
+# следом, обычно в течение суток. Держать это на памяти оператора ненадёжно:
+# узнаёшь о проблеме в тот момент, когда эфир уже не поднялся. Поэтому
+# обновляем по расписанию (см. одноимённый .timer).
+Description=Обновление yt-dlp (источники YouTube)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# -U самообновляется поверх текущего бинарника; вывод уходит в журнал,
+# посмотреть историю: journalctl -u yt-dlp-update
+ExecStart=/usr/local/bin/yt-dlp -U
+# обновление не критично для эфира: не смогли — попробуем на следующей неделе
+SuccessExitStatus=0 1
+TimeoutStartSec=300

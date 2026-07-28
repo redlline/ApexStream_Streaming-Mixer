@@ -1,0 +1,12 @@
+[Unit]
+Description=Еженедельная проверка обновлений yt-dlp
+
+[Timer]
+# ночь понедельника — подальше от эфирных часов
+OnCalendar=Mon 04:30
+# если сервер был выключен в это время, выполнить при ближайшей возможности
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
