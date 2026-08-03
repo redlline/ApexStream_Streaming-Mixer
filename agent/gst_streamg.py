@@ -531,16 +531,41 @@ class StreamG:
                 self._restart_pending = False
         return False
 
-    def set_input(self, url):
+    def set_input(self, url, tracks=None):
         """Бесшовная смена входного URL БЕЗ рестарта процесса. Пересобираем
         ТОЛЬКО P1 (входную часть — она и так одноразовая, тем же механизмом идёт
         реконнект провайдера), а P2 (компоновщик + энкодер + publish во Flussonic)
         продолжает работать. Publish НЕ обрывается, а 12с-буфер в P2 продолжает
         отдавать накопленный запас, пока новый вход подключается — если он
         поднимется быстрее буфера, зритель не заметит смены вообще. Полный
-        рестарт процесса (как было) ронял publish и сбрасывал буфер → ~30с фриза."""
+        рестарт процесса (как было) ронял publish и сбрасывал буфер → ~30с фриза.
+
+        tracks — необязательный новый набор аудиодорожек ("1" или "1,0").
+        Нужен потому, что у разных провайдеров дорожки лежат в разном порядке:
+        настроенная под один источник дорожка у другого может просто не
+        существовать, и тогда в эфир уходила тишина (движок подставляет её
+        вместо отсутствующей дорожки, иначе завис бы весь конвейер).
+
+        Менять КОЛИЧЕСТВО дорожек на лету нельзя: оно определяет структуру
+        выходной части (сколько интерканалов слушает P2 и сколько дорожек
+        уходит в мультиязычный SRT), а её мы не пересобираем. Поэтому при
+        другом количестве честно отказываемся — агент сделает полный рестарт."""
         if not url:
             return "ERR empty url"
+        if tracks:
+            new = []
+            for t in str(tracks).split(","):
+                t = t.strip()
+                if t.isdigit() and int(t) not in new:
+                    new.append(int(t))
+            if not new:
+                return "ERR bad tracks"
+            if len(new) != len(self.audio_tracks):
+                return (f"ERR tracks count {len(self.audio_tracks)}->{len(new)} "
+                        f"requires restart")
+            with self.lock:
+                self.audio_tracks = new
+            print(f"[streamG] аудиодорожки входа → {new}", flush=True)
         with self.lock:
             self.input_url = url
         # НЕ GLib.idle_add — см. подробное объяснение в _on_in_msg: set_state(NULL)
@@ -1932,7 +1957,8 @@ class StreamG:
         if p[0] == "stophtml":
             return self.stop_html()
         if p[0] == "setinput" and len(p) >= 2:
-            return self.set_input(p[1])
+            # setinput <url> [дорожки через запятую] — дорожки необязательны
+            return self.set_input(p[1], p[2] if len(p) > 2 else None)
         if p[0] == "testcut":
             return self.test_cut_input(p[1] if len(p) > 1 else 20)
         if p[0] == "ping":

@@ -162,6 +162,17 @@ def init_db():
             c.execute("ALTER TABLE input_presets ADD COLUMN logo_y INTEGER")
             c.execute("ALTER TABLE input_presets ADD COLUMN logo_w INTEGER")
             c.execute("ALTER TABLE input_presets ADD COLUMN logo_h INTEGER")
+        if "audio_tracks" not in pcols:
+            # Набор аудиодорожек ДЛЯ ЭТОГО ИСТОЧНИКА. У разных провайдеров они
+            # лежат в разном порядке (у одного речь первой, у другого — интершум),
+            # а настройка до сих пор жила только на уровне потока и в движок
+            # попадала при запуске. Из-за этого после переключения входа в эфир
+            # уходила тишина: движок искал дорожку с прежним номером, у нового
+            # источника её не оказывалось, и вместо неё подставлялась тишина
+            # (иначе завис бы весь конвейер, включая видео).
+            # NULL = своей настройки у пресета нет, работает общая настройка
+            # потока — прежнее поведение для всех уже созданных пресетов.
+            c.execute("ALTER TABLE input_presets ADD COLUMN audio_tracks TEXT")
         cols = [r["name"] for r in c.execute("PRAGMA table_info(schedules)")]
         if "video_id" not in cols:
             c.execute("ALTER TABLE schedules ADD COLUMN video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE")
@@ -1176,7 +1187,7 @@ class Mixer:
         if r.startswith("ERR"):
             raise RuntimeError(r)
 
-    def set_input(self, url):
+    def set_input(self, url, tracks=None):
         """Смена входного URL на лету, без рестарта процесса и обрыва publish.
         Канвас P2 (компоновщик+энкодер) всегда фиксирован настройками потока
         (out_w/out_h из редактора) и НЕ подстраивается под источник — P1 сам
@@ -1185,8 +1196,14 @@ class Mixer:
         источник) смена на источник другого разрешения давала «мыло» — тогда
         здесь была проверка мисматча с принудительным полным рестартом. С тех
         пор как канвас перестал зависеть от источника (см. Mixer.start()),
-        эта проверка не нужна — смена всегда безопасна и всегда бесшовна."""
-        r = self._gst_ctl(f"setinput {url}")
+        эта проверка не нужна — смена всегда безопасна и всегда бесшовна.
+
+        tracks — набор аудиодорожек нового источника ("1" или "1,0"), если он
+        отличается от текущего: у разных провайдеров дорожки лежат в разном
+        порядке. Движок откажет, если меняется их КОЛИЧЕСТВО — тогда нужен
+        полный рестарт (см. input_preset_activate)."""
+        cmd = f"setinput {url}" + (f" {tracks}" if tracks else "")
+        r = self._gst_ctl(cmd)
         if r.startswith("ERR"):
             raise RuntimeError(r)
         self.cfg["input_url"] = url   # чтобы автономный реконнект движка и будущий рестарт брали новый URL
@@ -2226,9 +2243,37 @@ def stream_autofailover(sid: int, enabled: int = Form(...)):
 @app.get("/api/streams/{sid}/presets")
 def input_presets_list(sid: int):
     with closing(db()) as c:
-        rows = c.execute("SELECT id,name,url,position,logo_set FROM input_presets "
-                         "WHERE stream_id=? ORDER BY position,id", (sid,)).fetchall()
+        rows = c.execute("SELECT id,name,url,position,logo_set,audio_tracks "
+                         "FROM input_presets WHERE stream_id=? ORDER BY position,id",
+                         (sid,)).fetchall()
     return [dict(r) for r in rows]
+
+@app.post("/api/streams/{sid}/presets/{pid}/tracks")
+def input_preset_tracks(sid: int, pid: int, audio_tracks: str = Form("")):
+    """Запомнить аудиодорожки ДЛЯ ЭТОГО источника. Пусто = своей настройки нет,
+    работает общая настройка потока (прежнее поведение).
+
+    Нужно потому, что у разных провайдеров дорожки лежат в разном порядке:
+    настроенная под один источник дорожка у другого может отсутствовать, и
+    тогда в эфир уходила тишина (движок подставляет её вместо недостающей —
+    иначе завис бы весь конвейер, включая видео)."""
+    audio_tracks = (audio_tracks or "").strip()
+    if audio_tracks:
+        # Строгая проверка: parse_audio_tracks (и vtracks поверх неё) намеренно
+        # мягкие — битый ввод превращают в "0", чтобы не ронять поток. Здесь так
+        # нельзя: оператор задаёт дорожки явно, и опечатка вместо ошибки молча
+        # записала бы "0", затерев прежнюю настройку (поймано тестом).
+        if not re.fullmatch(r"\d+(\s*,\s*\d+)*", audio_tracks):
+            raise HTTPException(400, "аудиодорожки: только числа через запятую, "
+                                     "например «1» или «1,0»")
+        audio_tracks = vtracks(audio_tracks)      # та же нормализация, что у потока
+    with closing(db()) as c, c:
+        if not c.execute("SELECT 1 FROM input_presets WHERE id=? AND stream_id=?",
+                         (pid, sid)).fetchone():
+            raise HTTPException(404, "preset not found")
+        c.execute("UPDATE input_presets SET audio_tracks=? WHERE id=?",
+                  (audio_tracks or None, pid))
+    return {"ok": True, "audio_tracks": audio_tracks or None}
 
 @app.post("/api/streams/{sid}/presets")
 def input_preset_add(sid: int, name: str = Form(...), url: str = Form(...)):
@@ -2257,7 +2302,8 @@ def input_preset_activate(sid: int, pid: int):
         preset = c.execute("SELECT * FROM input_presets WHERE id=? AND stream_id=?",
                            (pid, sid)).fetchone()
         row = c.execute("""SELECT name, input_url, logo_banner_id, logo_x, logo_y,
-                           logo_w, logo_h FROM streams WHERE id=?""", (sid,)).fetchone()
+                           logo_w, logo_h, audio_tracks FROM streams WHERE id=?""",
+                        (sid,)).fetchone()
     if not preset:
         raise HTTPException(404, "preset not found")
     if not row:
@@ -2280,28 +2326,56 @@ def input_preset_activate(sid: int, pid: int):
             with closing(db()) as c, c:
                 pos = c.execute("SELECT COALESCE(MAX(position),-1)+1 p FROM input_presets "
                                 "WHERE stream_id=?", (sid,)).fetchone()["p"]
+                # вместе с лого снимаем и текущие аудиодорожки: возврат на этот
+                # вход должен восстанавливать и звук тоже, иначе он вернётся с
+                # дорожками уже другого провайдера
                 c.execute("""INSERT INTO input_presets(stream_id,name,url,position,
-                             logo_set,logo_banner_id,logo_x,logo_y,logo_w,logo_h)
-                             VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                             logo_set,logo_banner_id,logo_x,logo_y,logo_w,logo_h,
+                             audio_tracks)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                          (sid, "Прежний вход", cur_url, pos, has_logo,
                           row["logo_banner_id"], row["logo_x"], row["logo_y"],
-                          row["logo_w"], row["logo_h"]))
+                          row["logo_w"], row["logo_h"], row["audio_tracks"] or "0"))
+    # Аудиодорожки этого источника. У разных провайдеров они лежат в разном
+    # порядке, и без этого после переключения в эфир уходила тишина: движок
+    # искал дорожку с прежним номером, а у нового источника её не было.
+    pk = preset.keys()
+    want_tracks = preset["audio_tracks"] if "audio_tracks" in pk else None
+    want_tracks = (want_tracks or "").strip() or None
+    cur_tracks = (row["audio_tracks"] or "0").strip()
+    tracks_changed = bool(want_tracks) and want_tracks != cur_tracks
+    # менять КОЛИЧЕСТВО дорожек на лету нельзя — оно определяет структуру
+    # выходной части (интерканалы P2, дорожки мультиязычного SRT), а её мы не
+    # пересобираем. При другом количестве честно перезапускаем поток.
+    need_restart = tracks_changed and (len(parse_audio_tracks(want_tracks))
+                                       != len(parse_audio_tracks(cur_tracks)))
+
     m = MIXERS.get(sid)
     seamless = False
-    if m and m.alive():
+    if m and m.alive() and not need_restart:
         try:
-            m.set_input(preset["url"])
+            m.set_input(preset["url"], want_tracks if tracks_changed else None)
             seamless = True
         except RuntimeError as e:
             raise HTTPException(400, f"смена входа не удалась: {e}")
-    # персистим URL в БД в любом случае — чтобы следующий старт (если поток
-    # сейчас не в эфире, или бесшовно не получилось) уже брал новый пресет
+    # персистим URL (и дорожки) в БД в любом случае — чтобы следующий старт
+    # (если поток сейчас не в эфире или бесшовно не вышло) взял уже новый пресет
     with closing(db()) as c, c:
-        c.execute("UPDATE streams SET input_url=? WHERE id=?", (preset["url"], sid))
+        if tracks_changed:
+            c.execute("UPDATE streams SET input_url=?, audio_tracks=? WHERE id=?",
+                      (preset["url"], want_tracks, sid))
+        else:
+            c.execute("UPDATE streams SET input_url=? WHERE id=?", (preset["url"], sid))
+    if need_restart and m and m.alive():
+        # число языков другое — бесшовно нельзя, перезапускаем весь поток
+        LOG.event(f"[{row['name']}] дорожки {cur_tracks} → {want_tracks}: "
+                  f"нужен перезапуск потока (разное количество)")
+        MIXERS.pop(sid, None)
+        m.stop()
+        get_mixer(sid).start()
     # восстанавливаем лого этого пресета (если запоминалось, logo_set не NULL):
     # переключение входа больше не сбрасывает лого — оно приходит к виду, в
     # котором настроено для этого конкретного потока/входа.
-    pk = preset.keys()
     if "logo_set" in pk and preset["logo_set"] is not None:
         with closing(db()) as c, c:
             if preset["logo_set"]:
