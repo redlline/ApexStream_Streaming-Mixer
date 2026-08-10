@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>ApexStream — Руководство оператора</title>
+<style>
+  /* Печатный документ: светлый фон, крупный шрифт, аккуратные разрывы страниц.
+     Всё оформление внутри файла — документ самодостаточен и открывается
+     где угодно без интернета. Сохранение в PDF: Ctrl+P → «Сохранить как PDF». */
+  @page { size: A4; margin: 18mm 16mm 20mm 16mm; }
+
+  :root{
+    --ink:#1a1d23; --muted:#5b6472; --line:#d8dde5;
+    --accent:#1f6feb; --accent-soft:#eef4ff;
+    --warn:#b45309; --warn-soft:#fff7ed;
+    --ok:#15803d; --ok-soft:#f0fdf4;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:0 0 40px;
+    font:15px/1.62 "Segoe UI",-apple-system,Roboto,Arial,sans-serif;
+    color:var(--ink); background:#fff;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  .page{max-width:860px;margin:0 auto;padding:0 24px}
+
+  /* ---------- обложка ---------- */
+  .cover{
+    min-height:88vh; display:flex; flex-direction:column; justify-content:center;
+    padding:0 24px; page-break-after:always;
+  }
+  .cover .brand{
+    font-size:13px; letter-spacing:.22em; text-transform:uppercase;
+    color:var(--accent); font-weight:700; margin-bottom:22px;
+  }
+  .cover h1{
+    font-size:46px; line-height:1.1; margin:0 0 14px; font-weight:700; letter-spacing:-.5px;
+  }
+  .cover .sub{font-size:19px; color:var(--muted); margin:0 0 40px; max-width:560px}
+  .cover .rule{height:4px;width:72px;background:var(--accent);border-radius:2px;margin-bottom:36px}
+  .cover .meta{font-size:14px;color:var(--muted);line-height:1.9}
+  .cover .meta b{color:var(--ink);font-weight:600}
+
+  /* ---------- оглавление ---------- */
+  .toc{page-break-after:always;padding-top:12px}
+  .toc h2{font-size:24px;margin:0 0 20px;padding:0;border:0}
+  .toc ol{list-style:none;counter-reset:t;padding:0;margin:0}
+  .toc li{counter-increment:t;padding:9px 0;border-bottom:1px solid var(--line);display:flex;gap:12px}
+  .toc li::before{
+    content:counter(t); flex:0 0 30px; height:26px; line-height:26px; text-align:center;
+    background:var(--accent-soft); color:var(--accent); border-radius:5px;
+    font-weight:700; font-size:13px;
+  }
+  .toc a{color:var(--ink);text-decoration:none;font-weight:500}
+  .toc .d{color:var(--muted);font-weight:400;font-size:13.5px;display:block;margin-top:2px}
+
+  /* ---------- заголовки ---------- */
+  h2.sec{
+    font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);
+    font-weight:700;margin:0 0 6px;
+  }
+  h2.title{
+    font-size:29px;margin:0 0 18px;padding-bottom:12px;border-bottom:2px solid var(--line);
+    font-weight:700;letter-spacing:-.3px;
+  }
+  section{page-break-before:always;padding-top:6px}
+  section:first-of-type{page-break-before:avoid}
+  h3{font-size:19px;margin:26px 0 10px;font-weight:650}
+  h4{font-size:16px;margin:18px 0 8px;font-weight:650;color:#2b3240}
+  p{margin:0 0 11px}
+  ul,ol{margin:0 0 12px;padding-left:22px}
+  li{margin:5px 0}
+  code{
+    font:13px/1.5 "Cascadia Mono",Consolas,monospace;
+    background:#f1f3f7;border:1px solid #e3e7ee;border-radius:4px;padding:1px 5px;
+  }
+  pre{
+    background:#f7f9fc;border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:6px;padding:12px 14px;overflow:auto;margin:0 0 14px;
+    font:13px/1.6 "Cascadia Mono",Consolas,monospace;
+  }
+  pre code{background:none;border:0;padding:0}
+
+  /* ---------- таблицы ---------- */
+  table{width:100%;border-collapse:collapse;margin:0 0 16px;font-size:14.2px;page-break-inside:avoid}
+  th{
+    text-align:left;background:#f4f6fa;border-bottom:2px solid var(--line);
+    padding:9px 11px;font-weight:650;font-size:13px;
+  }
+  td{padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+
+  /* ---------- врезки ---------- */
+  .note{
+    border-radius:7px;padding:12px 15px;margin:0 0 16px;font-size:14.2px;
+    page-break-inside:avoid;border:1px solid;
+  }
+  .note b{display:block;margin-bottom:3px;font-size:13px;letter-spacing:.02em}
+  .note.info{background:var(--accent-soft);border-color:#c7dbff}
+  .note.info b{color:var(--accent)}
+  .note.warn{background:var(--warn-soft);border-color:#fed7aa}
+  .note.warn b{color:var(--warn)}
+  .note.ok{background:var(--ok-soft);border-color:#bbf7d0}
+  .note.ok b{color:var(--ok)}
+
+  /* ---------- шаги ---------- */
+  .steps{counter-reset:s;list-style:none;padding:0;margin:0 0 16px}
+  .steps li{
+    counter-increment:s;position:relative;padding:0 0 14px 40px;margin:0;
+    border-left:2px solid var(--line);
+  }
+  .steps li:last-child{border-left-color:transparent;padding-bottom:0}
+  .steps li::before{
+    content:counter(s);position:absolute;left:-13px;top:-2px;
+    width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;
+    font-size:12.5px;font-weight:700;text-align:center;line-height:24px;
+  }
+  .kbd{
+    display:inline-block;background:#fff;border:1px solid #c6ccd6;border-bottom-width:2px;
+    border-radius:4px;padding:0 6px;font-size:12.5px;font-weight:600;
+  }
+  .btn-ui{
+    display:inline-block;background:#eef1f6;border:1px solid #d3d9e3;border-radius:5px;
+    padding:1px 8px;font-size:13.5px;font-weight:600;white-space:nowrap;
+  }
+  footer{
+    margin-top:38px;padding-top:14px;border-top:1px solid var(--line);
+    font-size:12.5px;color:var(--muted);text-align:center;
+  }
+  @media print{
+    .page{max-width:none;padding:0}
+    a{color:var(--ink);text-decoration:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="brand">ApexStream · Streaming Mixer</div>
+  <h1>Руководство<br>оператора</h1>
+  <div class="rule"></div>
+  <p class="sub">Как завести поток, выпустить рекламу в эфир, врезаться
+     из OBS и переключить источник, ничего не сломав.</p>
+  <div class="meta">
+    <b>Для кого:</b> операторы эфира<br>
+    <b>Версия системы:</b> актуальна на момент выпуска документа<br>
+    <b>Смежные документы:</b> README (установка и обслуживание), API.md (пульты и автоматизация)
+  </div>
+</div>
+
+<div class="page">
+
+<nav class="toc">
+  <h2>Содержание</h2>
+  <ol>
+    <li><a href="#s1">Вход в панель<span class="d">роли, права, выбор сервера</span></a></li>
+    <li><a href="#s2">Устройство панели<span class="d">что где находится</span></a></li>
+    <li><a href="#s3">Создание потока<span class="d">три типа источника и их различия</span></a></li>
+    <li><a href="#s4">Запуск и остановка<span class="d">старт, превью, контроль состояния</span></a></li>
+    <li><a href="#s5">Реклама в эфире<span class="d">баннеры, HTML-графика, ролики</span></a></li>
+    <li><a href="#s6">Логотип канала<span class="d">размещение и привязка к источнику</span></a></li>
+    <li><a href="#s7">Врезка из OBS<span class="d">подключение, выход в эфир, звук</span></a></li>
+    <li><a href="#s8">Переключение источников<span class="d">входы, резерв, автопереключение</span></a></li>
+    <li><a href="#s9">Звук и аудиодорожки<span class="d">выбор дорожки, мультиязык</span></a></li>
+    <li><a href="#s10">Проверка источника<span class="d">до создания потока</span></a></li>
+    <li><a href="#s11">Автоматизация<span class="d">очередь, расписание, программа</span></a></li>
+    <li><a href="#s12">Решение проблем<span class="d">типичные ситуации и что делать</span></a></li>
+  </ol>
+</nav>
+
+<!-- ============ 1 ============ -->
+<section id="s1">
+  <h2 class="sec">Раздел 1</h2>
+  <h2 class="title">Вход в панель</h2>
+
+  <p>Откройте адрес панели в браузере и войдите под своим логином. Роль указана
+     рядом с именем вверху справа.</p>
+
+  <table>
+    <tr><th style="width:34%">Роль</th><th>Что доступно</th></tr>
+    <tr><td>Только просмотр</td><td>смотреть эфир и состояние, ничего не менять</td></tr>
+    <tr><td>Оператор</td><td>полное управление <b>своими</b> потоками</td></tr>
+    <tr><td>Администратор</td><td>все потоки, пользователи, серверы</td></tr>
+  </table>
+
+  <div class="note info">
+    <b>Ваши потоки видны только вам</b>
+    Поток принадлежит тому, кто его создал. Другие операторы его не видят и не
+    могут ни запустить, ни остановить — так вы не мешаете друг другу.
+    Администратор видит все потоки и знает, кем каждый создан.
+  </div>
+
+  <p>Если серверов несколько, вверху есть переключатель. Обращайте внимание, на
+     каком сервере работаете: наборы потоков у них разные.</p>
+
+  <p>Там же переключается язык интерфейса — русский или türkmen.</p>
+</section>
+
+<!-- ============ 2 ============ -->
+<section id="s2">
+  <h2 class="sec">Раздел 2</h2>
+  <h2 class="title">Устройство панели</h2>
+
+  <table>
+    <tr><th style="width:26%">Вкладка</th><th>Назначение</th></tr>
+    <tr><td><b>Потоки</b></td><td>главный экран: каналы, запуск, эфирные кнопки, превью</td></tr>
+    <tr><td>Баннеры</td><td>картинки для рекламы — GIF и PNG</td></tr>
+    <tr><td>Шаблоны</td><td>HTML-графика: таймеры, таблицы, бегущие строки</td></tr>
+    <tr><td>Ролики</td><td>видеофайлы MP4 для полноэкранной вставки</td></tr>
+    <tr><td>Очередь</td><td>баннеры для показа по кругу</td></tr>
+    <tr><td>Расписание</td><td>автоматический показ в заданное время</td></tr>
+    <tr><td>Программа</td><td>напоминания оператору по ходу эфира</td></tr>
+    <tr><td>Проверка</td><td>просмотр источника до создания потока</td></tr>
+    <tr><td>Логи</td><td>что происходит внутри — при разборе проблем</td></tr>
+    <tr><td>Пользователи</td><td>учётные записи и журнал действий <i>(администраторам)</i></td></tr>
+    <tr><td>Настройки</td><td>серверы, MediaMTX</td></tr>
+  </table>
+</section>
+
+<!-- ============ 3 ============ -->
+<section id="s3">
+  <h2 class="sec">Раздел 3</h2>
+  <h2 class="title">Создание потока</h2>
+
+  <p>Вкладка <span class="btn-ui">Потоки</span> → «Добавить поток». Ключевое
+     решение здесь — <b>тип входа</b>: от него зависит, кто кому звонит.</p>
+
+  <h3>Забираем сами</h3>
+  <p>Обычный случай: провайдер дал адрес (HTTP/HLS, RTSP или SRT). Вставьте его
+     в поле «входящий». Кнопка <span class="btn-ui">Проверить</span> скажет,
+     отвечает ли источник.</p>
+
+  <h3>Нам пушат по SRT</h3>
+  <p>Когда источник — Astra Cesbo или аппаратный энкодер — умеет только отдавать
+     поток сам. Часто это единственный вариант, если сеть источника видит нас,
+     а мы её — нет.</p>
+  <ol class="steps">
+    <li>Придумайте <code>streamid</code> — короткое имя латиницей, например
+        <code>astra1</code>.</li>
+    <li>Панель покажет готовый адрес — скопируйте его в энкодер, режим
+        <b>caller</b>.</li>
+    <li>Вход потока подставится автоматически.</li>
+  </ol>
+  <div class="note warn">
+    <b>Сначала энкодер, потом «Старт»</b>
+    Если в момент запуска сигнала нет, старт будет отклонён. Это не поломка,
+    а защита от выхода в эфир с мёртвым входом.
+  </div>
+
+  <h3>YouTube-трансляция</h3>
+  <p>Вставьте ссылку. Предпочтительная форма —
+     <code>https://www.youtube.com/@КАНАЛ/live</code>: она всегда указывает на
+     идущую сейчас трансляцию канала. Ссылка вида <code>watch?v=…</code>
+     привязана к конкретному эфиру и перестанет работать, когда он закончится.</p>
+  <div class="note info">
+    <b>Ссылку можно вставить и в обычное поле</b>
+    Панель распознает адрес YouTube в поле «входящий» и переключит тип входа
+    сама — ошибиться негде.
+  </div>
+
+  <h3>Остальные поля</h3>
+  <table>
+    <tr><th style="width:32%">Поле</th><th>Что указывать</th></tr>
+    <tr><td>Исходящий</td><td>адрес publish во Flussonic; можно оставить пустым</td></tr>
+    <tr><td>Кадр Ш×В</td><td>разрешение эфира, обычно <code>1920×1080</code></td></tr>
+    <tr><td>Баннер Ш×В</td><td>размер баннерной зоны, обычно <code>1920×150</code></td></tr>
+    <tr><td>Кодек</td><td><code>h264_nvenc</code> — кодирование на видеокарте, оставляйте его</td></tr>
+    <tr><td>Автостарт</td><td>поднимать ли поток автоматически при старте системы</td></tr>
+    <tr><td>Аудиодорожки</td><td><b>первый номер идёт в эфир</b> — см. раздел 9</td></tr>
+    <tr><td>Заглушка при обрыве</td><td>картинка вместо чёрного экрана, если провайдер пропал</td></tr>
+  </table>
+
+  <div class="note ok">
+    <b>Задайте заглушку сразу</b>
+    Без неё при обрыве провайдера зритель увидит чёрный экран. С ней — вашу
+    картинку, пока сигнал не вернётся.
+  </div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section id="s4">
+  <h2 class="sec">Раздел 4</h2>
+  <h2 class="title">Запуск и остановка</h2>
+
+  <p>У каждого потока в списке: <span class="btn-ui">Старт</span>,
+     <span class="btn-ui">Стоп</span>, <span class="btn-ui">Рестарт</span>.</p>
+
+  <p>Перед запуском система проверяет источник. Если он не отвечает, старт будет
+     отклонён с объяснением причины.</p>
+
+  <p>Статус читается напрямую с сервера, а не из базы: что видите — то и
+     происходит на самом деле.</p>
+
+  <h3>Превью</h3>
+  <p>Кнопка <span class="btn-ui">Плеер</span> или клик по плитке открывает эфир.
+     Мультивью показывает все потоки сразу. Превью можно выключить кнопкой
+     вверху карточки, если нужно разгрузить компьютер — на сам эфир это никак
+     не влияет.</p>
+</section>
+
+<!-- ============ 5 ============ -->
+<section id="s5">
+  <h2 class="sec">Раздел 5</h2>
+  <h2 class="title">Реклама в эфире</h2>
+
+  <p>У запущенного потока три кнопки: <span class="btn-ui">Баннер</span>,
+     <span class="btn-ui">HTML</span>, <span class="btn-ui">Ролик</span>.</p>
+
+  <h3>Баннер</h3>
+  <p>Картинка (GIF или PNG) поверх эфира, обычно полосой внизу.</p>
+  <table>
+    <tr><th style="width:28%">Параметр</th><th>Значение</th></tr>
+    <tr><td>Длительность</td><td>сколько секунд держать на экране, включая плавное появление</td></tr>
+    <tr><td>Fade</td><td>плавность появления и исчезновения</td></tr>
+    <tr><td>Разместить вручную</td><td>при открытом превью рамку можно перетащить мышкой и задать точный размер</td></tr>
+  </table>
+  <p>Пока баннер на экране, второй запустить нельзя — дождитесь окончания показа.</p>
+
+  <h3>HTML-графика</h3>
+  <p>Живая графика из браузера: таймеры, таблицы, бегущие строки. Готовые
+     заготовки — во вкладке «Шаблоны», там же предпросмотр.</p>
+
+  <h3>Ролик</h3>
+  <p>Полноэкранное видео со звуком. Перекрывает эфир целиком, снимается кнопкой
+     <span class="btn-ui">Снять ролик</span>. Громкость выравнивается
+     автоматически.</p>
+
+  <div class="note info">
+    <b>Порядок слоёв</b>
+    Снизу вверх: эфир → врезка из OBS → баннер → логотип → HTML → ролик.
+    То есть баннер и логотип видны поверх врезки из OBS, а ролик перекрывает всё.
+  </div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section id="s6">
+  <h2 class="sec">Раздел 6</h2>
+  <h2 class="title">Логотип канала</h2>
+
+  <p>Кнопка <span class="btn-ui">Логотип</span> у потока: выберите картинку и
+     место. При включённом превью логотип можно перетащить мышкой и растянуть до
+     нужного размера.</p>
+
+  <div class="note ok">
+    <b>Логотип запоминается для каждого источника отдельно</b>
+    Настроили под один вход, переключились на другой — логотип примет тот вид,
+    который настроен для него. Подгонять заново при каждом переключении не нужно.
+  </div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section id="s7">
+  <h2 class="sec">Раздел 7</h2>
+  <h2 class="title">Врезка из OBS</h2>
+
+  <p>Живая картинка из OBS поверх эфира. Сделана в два шага — чтобы не выпустить
+     в эфир непроверенный сигнал.</p>
+
+  <h3>Настройка в OBS (один раз)</h3>
+  <p>«Настройки → Вещание → Пользовательский», сервер:</p>
+  <pre><code>srt://АДРЕС_СЕРВЕРА:8890?streamid=publish:obs1</code></pre>
+  <p>Режим — <b>caller</b>.</p>
+
+  <h3>Работа в панели</h3>
+  <ol class="steps">
+    <li><b>Подключить</b> — сигнал появится в маленьком превью карточки.
+        В эфире пока ничего не меняется.</li>
+    <li><b>В эфир</b> — картинка плавно выходит в эфир.</li>
+    <li><b>Стоп</b> — врезка плавно снимается, канал отключается.</li>
+  </ol>
+
+  <h3>Звук</h3>
+  <p>Режим выбирается заранее, до выхода в эфир:</p>
+  <table>
+    <tr><th style="width:38%">Режим</th><th>Что слышно в эфире</th></tr>
+    <tr><td>Глушить эфир</td><td><b>только</b> звук из OBS</td></tr>
+    <tr><td>Оставить звук эфира</td><td><b>только</b> звук эфира; картинка из OBS идёт без звука</td></tr>
+  </table>
+
+  <div class="note warn">
+    <b>Когда «В эфир» не сработает</b>
+    Только если с OBS не идёт <b>ничего</b> — ни картинки, ни звука. Иначе
+    кнопка заглушила бы эфир, не дав ничего взамен. Заставка, статичный кадр,
+    видео на паузе или одна музыка — это нормальный сигнал, они проходят.
+  </div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section id="s8">
+  <h2 class="sec">Раздел 8</h2>
+  <h2 class="title">Переключение источников</h2>
+
+  <p>Кнопка <span class="btn-ui">Входы</span> у потока — список сохранённых
+     источников.</p>
+
+  <div class="note ok">
+    <b>Переключение идёт без разрыва эфира</b>
+    Publish не прерывается, зритель ничего не замечает.
+  </div>
+
+  <ul>
+    <li>Текущий вход, если он не был сохранён, сохранится автоматически как
+        «Прежний вход» — вернуться можно одним кликом.</li>
+    <li>У каждого входа видна полная ссылка и кнопка «Скопировать путь».</li>
+    <li>Галочка <b>«автопереключение»</b> — если источник замолчал, система сама
+        перейдёт на следующий по кругу.</li>
+  </ul>
+
+  <p>Вместе с источником восстанавливаются <b>логотип</b> и
+     <b>аудиодорожки</b>, настроенные именно для него.</p>
+</section>
+
+<!-- ============ 9 ============ -->
+<section id="s9">
+  <h2 class="sec">Раздел 9</h2>
+  <h2 class="title">Звук и аудиодорожки</h2>
+
+  <div class="note info">
+    <b>Главное правило</b>
+    Первый номер в поле «аудиодорожки» уходит в эфир. Нумерация с нуля: первая
+    дорожка источника — <code>0</code>, вторая — <code>1</code>.
+  </div>
+
+  <p>Зачем это нужно: провайдеры часто ставят первой служебную дорожку —
+     интершум, чистый звук со стадиона без комментатора. Речь при этом идёт
+     второй. В таком случае в поле нужно указать <code>1</code>.</p>
+
+  <h3>Как узнать состав источника</h3>
+  <p>Кнопка <span class="btn-ui">🎚 Дорожки</span> — рядом с полем при создании
+     потока и у каждого входа в диалоге «Входы». Она опрашивает источник и
+     показывает, что в нём реально есть:</p>
+  <pre><code>#0 — INTERSHUM · mp2 · 2ch
+#1 — RUS · aac · 2ch</code></pre>
+  <p>Выбираете нужную — поле заполнится само. Угадывать номера не требуется.</p>
+
+  <div class="note ok">
+    <b>Настройка запоминается для каждого входа отдельно</b>
+    У разных провайдеров порядок дорожек разный. Раньше после переключения
+    источника звук мог пропасть: система искала дорожку с прежним номером,
+    а у нового источника её не было. Теперь у каждого входа своя настройка.
+  </div>
+
+  <h3>Мультиязык</h3>
+  <p>Несколько номеров через запятую (<code>1,0</code>): первый идёт в эфир,
+     остальные уходят дополнительными дорожками — зритель может переключать
+     язык. Реклама звучит одним общим звуком поверх всех языков.</p>
+
+  <div class="note warn">
+    <b>Смена количества дорожек прерывает эфир</b>
+    Изменение порядка применяется на лету. Изменение их <b>количества</b>
+    требует перезапуска потока — эфир прервётся на несколько секунд. Система
+    сделает это сама и запишет причину в журнал.
+  </div>
+
+  <h3>Громкость</h3>
+  <p>Фейдеры слева от превью: мастер-выход и ролик. Рядом VU-метры — по ним
+     видно, идёт ли звук вообще.</p>
+</section>
+
+<!-- ============ 10 ============ -->
+<section id="s10">
+  <h2 class="sec">Раздел 10</h2>
+  <h2 class="title">Проверка источника</h2>
+
+  <p>Вкладка <span class="btn-ui">Проверка</span> позволяет посмотреть, что
+     отдаёт источник, ещё до создания потока. Вставьте адрес, нажмите
+     «Проверить» — появится картинка.</p>
+
+  <div class="note info">
+    <b>Проба показывает то, что реально приходит</b>
+    Чёрный экран и тишина означают, что источник действительно пустой.
+    У событийных каналов между трансляциями это нормально — поломки здесь нет.
+  </div>
+</section>
+
+<!-- ============ 11 ============ -->
+<section id="s11">
+  <h2 class="sec">Раздел 11</h2>
+  <h2 class="title">Автоматизация</h2>
+
+  <table>
+    <tr><th style="width:26%">Инструмент</th><th>Что делает</th></tr>
+    <tr><td>Очередь</td><td>список баннеров, показываются по кругу</td></tr>
+    <tr><td>Расписание</td><td>показ в заданное время: разово, с повтором каждые N минут, в диапазоне дат. Можно назначить баннер, ролик или шаблон</td></tr>
+    <tr><td>Программа</td><td>сценарий эфира с напоминаниями оператору. Сама в эфир ничего не выпускает — только подсказывает, что и когда пора запустить</td></tr>
+  </table>
+</section>
+
+<!-- ============ 12 ============ -->
+<section id="s12">
+  <h2 class="sec">Раздел 12</h2>
+  <h2 class="title">Решение проблем</h2>
+
+  <table>
+    <tr><th style="width:40%">Что вы видите</th><th>Что это значит</th></tr>
+    <tr><td>Старт отклонён: «вход недоступен»</td><td>источник не отвечает: не запущен энкодер, не идёт трансляция или ошибка в адресе</td></tr>
+    <tr><td>В эфире заглушка</td><td>провайдер замолчал; система ждёт и переподключается сама</td></tr>
+    <tr><td>Чёрный экран в «Проверке»</td><td>источник действительно пустой — вопрос к провайдеру</td></tr>
+    <tr><td>После переключения входа пропал звук</td><td>у нового источника другой порядок дорожек — задайте их кнопкой «🎚 Дорожки»</td></tr>
+    <tr><td>«В эфир» у OBS не срабатывает</td><td>с OBS не идёт ни картинки, ни звука — проверьте, запущено ли вещание</td></tr>
+    <tr><td>Поток с YouTube не стартует</td><td>трансляция сейчас не идёт либо ссылка ведёт на завершившийся эфир</td></tr>
+    <tr><td>Не вижу поток, который точно был</td><td>он создан другим оператором — полный список у администратора</td></tr>
+    <tr><td>Превью не запускается</td><td>обновите страницу: <span class="kbd">Ctrl</span> + <span class="kbd">F5</span></td></tr>
+  </table>
+
+  <h3>Если непонятно</h3>
+  <p>Вкладка <span class="btn-ui">Логи</span> показывает, что происходит внутри
+     потока — выберите нужный поток в списке сверху. Кнопки очистки помогут
+     убрать старые записи, чтобы не мешали.</p>
+
+  <p>Администратору доступен <b>журнал действий</b> (вкладка «Пользователи») с
+     поиском по логину, действию и дате — видно, кто и что делал.</p>
+
+  <footer>
+    ApexStream — Streaming Mixer · Руководство оператора · © Gopnik_ITIshnik
+  </footer>
+</section>
+
+</div>
+</body>
+</html>
