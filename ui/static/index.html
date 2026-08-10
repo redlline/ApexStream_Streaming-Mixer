@@ -561,7 +561,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
   </div>
   <div class="card"><h3>Потоки</h3>
     <p class="muted" style="margin-top:0">Старт/Стоп/Рестарт управляют реальным GStreamer-процессом на сервере с Flussonic: он принимает вход от провайдера, накладывает баннер/логотип/ролик/HTML и публикует результат во Flussonic. Статус читается напрямую с процесса, а не из базы — что видите, то и происходит на сервере. Перед стартом агент сам проверяет, отвечает ли провайдер — если нет, старт будет отклонён с указанием причины.</p>
-    <table><thead><tr><th>Название</th><th>Вход</th><th>Выход</th><th>Статус</th><th>Логотип</th><th>Буфер</th><th>Действия</th></tr></thead>
+    <table><thead><tr><th>Название</th><th id="thOwner" style="display:none">Создал</th><th>Вход</th><th>Выход</th><th>Статус</th><th>Логотип</th><th>Буфер</th><th>Действия</th></tr></thead>
     <tbody id="streamRows"></tbody></table>
   </div>
 </section>
@@ -880,6 +880,9 @@ function applyUser(d){IS_ADMIN=!!d.is_admin;USER_ROLE=d.role||(IS_ADMIN?"admin":
   const roleLabel={admin:" (админ)",viewer:" (только просмотр)"}[USER_ROLE]||"";
   $("#whoami").textContent=d.username+roleLabel;
   $("#usersTab").style.display=IS_ADMIN?"":"none";
+  // колонка «Создал» — только админу: оператору она бессмысленна, он и так
+  // видит лишь свои потоки. Шапку показываем здесь, строки рисует loadStreams
+  const th=$("#thOwner");if(th)th.style.display=IS_ADMIN?"":"none";
   document.body.classList.toggle("viewerMode",IS_VIEWER);}
 $("#tabs").addEventListener("click",e=>{
   if(e.target.dataset.t===undefined)return;
@@ -1480,6 +1483,7 @@ async function loadStreams(){
   $("#streamRows").innerHTML=list.map(s=>{
     const st=s.status||{},run=st.running;
     return `<tr><td>${esc(s.name)}</td>
+      ${IS_ADMIN?`<td class="muted">${s.owner?esc(s.owner):"—"}</td>`:""}
       <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.yt_url||s.input_url)}">${s.yt_url?"▶ YouTube: "+esc(s.yt_url):esc(s.input_url)}</td>
       <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${esc(s.output_url)}</td>
       <td><span class="tag ${run?"ok":"bad"}">${run?'<span class="dot"></span>В ЭФИРЕ':"остановлен"}</span>

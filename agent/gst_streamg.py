@@ -151,6 +151,10 @@ class StreamG:
         self.last_error = None
         # ---- звук: громкость выхода/ролика + VU-метры (UI слева от PGM)
         self.last_levels = {"out_rms": -100.0, "ad_rms": -100.0, "mic_rms": -100.0, "obs_rms": -100.0}
+        # сколько видеокадров пришло с OBS — вместе с obs_rms даёт ответ на
+        # вопрос «сигнал вообще есть?». Нужны оба: картинка может идти без
+        # звука (заставка, видео на паузе), а звук — без картинки (музыка).
+        self.obs_video_frames = 0
         self.ad_volume_default = 1.0   # применяется каждому новому ролику при старте (см. play_video)
         self.ad_volume_el = None       # текущий volume-элемент играющего ролика (для "advol")
         # ---- микрофон комментатора (постоянный SRT-вход от OBS через
@@ -1399,6 +1403,13 @@ class StreamG:
             dec.connect("pad-added", on_pad)
             b.add_pad(Gst.GhostPad.new("vsrc", vcaps.get_static_pad("src")))
             b.add_pad(Gst.GhostPad.new("asrc", obslevel.get_static_pad("src")))
+            # Счётчик реально пришедших ВИДЕОкадров. Раньше готовность OBS
+            # проверялась по уровню звука (obs_rms), и это было ошибкой: если
+            # из OBS идёт статичная картинка, заставка или видео на паузе —
+            # звука нет вовсе, обс_rms остаётся на -100, и «В эфир» отказывал,
+            # хотя картинка была. Кадры же идут всегда, пока OBS вещает.
+            b.get_static_pad("vsrc").add_probe(
+                Gst.PadProbeType.BUFFER, self._obs_frame_probe)
 
             self.p_out.add(b)
             # КРИТИЧНО: video_tee/audio_tee — ПРЯМЫЕ дети p_out (как и b, и
@@ -1455,11 +1466,19 @@ class StreamG:
             return "ERR obs not connected"
         if self.obs_is_live:
             return "ERR obs already live"
-        # защита оператора: если с OBS реально не идёт сигнал (obslevel не
-        # запостил ни одного замера — OBS не публикует/отвалился), выход
-        # «в эфир» только заглушил бы звук трансляции, не показав ничего.
-        if self.last_levels.get("obs_rms", -100.0) <= -95.0:
-            return "ERR нет сигнала с OBS — проверьте, что трансляция в OBS запущена"
+        # Защита оператора: если с OBS реально НИЧЕГО не идёт, выход «в эфир»
+        # только заглушил бы трансляцию, не показав и не дав ничего.
+        #
+        # Сигналом считаем ЛЮБОЕ из двух: видеокадры или звук. Раньше здесь
+        # стояла только проверка obs_rms, и она отвергала рабочие сценарии без
+        # звука — заставку, статичную картинку, видео на паузе. Обратный случай
+        # тоже реален: из OBS могут пустить только музыку, без картинки.
+        # Поэтому достаточно, чтобы шло хоть что-то.
+        has_video = self.obs_video_frames > 0
+        has_audio = self.last_levels.get("obs_rms", -100.0) > -95.0
+        if not (has_video or has_audio):
+            return ("ERR нет сигнала с OBS — ни картинки, ни звука. Проверьте, "
+                    "что трансляция в OBS запущена")
         threading.Thread(target=self._obs_go_live, daemon=True).start()
         return "OK obslive"
 
@@ -1529,6 +1548,13 @@ class StreamG:
         threading.Thread(target=self._obs_stop, daemon=True).start()
         return "OK obsoff"
 
+    def _obs_frame_probe(self, pad, info):
+        """Считаем кадры, пришедшие с OBS. Дешевле и надёжнее любых догадок:
+        пока OBS вещает, кадры идут — даже если это статичная картинка или
+        видео на паузе (звука при этом нет вовсе)."""
+        self.obs_video_frames += 1
+        return Gst.PadProbeReturn.OK
+
     def _obs_reset_state(self):
         self.obs_bin = None
         self.obs_refs = None
@@ -1538,6 +1564,10 @@ class StreamG:
         self.obs_audio_tee = None
         self.obs_is_live = False
         self.obs_stopping = False
+        # сколько видеокадров реально пришло с OBS — признак «сигнал есть».
+        # Именно кадры, а не уровень звука: заставка, статичная картинка или
+        # видео на паузе идут без звука, но это полноценный сигнал.
+        self.obs_video_frames = 0
         self.last_levels["obs_rms"] = -100.0
 
     def _obs_stop(self):

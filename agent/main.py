@@ -243,6 +243,14 @@ def init_db():
             # процесс переполучает ссылку сам, а поток читает его как обычный
             # источник.
             c.execute("ALTER TABLE streams ADD COLUMN yt_url TEXT")
+        if "owner" not in cols:
+            # логин оператора, создавшего поток. Нужен, чтобы операторы не
+            # мешали друг другу: каждый видит и трогает только свои потоки,
+            # админ — все, и ему видно, чей поток. NULL = поток создан до
+            # разграничения или напрямую через API (пульт/скрипт) — такие
+            # доступны всем, иначе люди разом потеряли бы доступ к тому, с
+            # чем уже работают.
+            c.execute("ALTER TABLE streams ADD COLUMN owner TEXT")
         vcols = [r["name"] for r in c.execute("PRAGMA table_info(videos)")]
         if "gain_db" not in vcols:
             # авто-нормализация громкости ролика (EBU R128-подобный анализ
@@ -1649,7 +1657,65 @@ def auth(x_api_key: str = Header(default="")):
     if not API_KEY or x_api_key != API_KEY:
         raise HTTPException(401, "bad api key")
 
+# ---- разграничение потоков между операторами
+# Панель подставляет X-UI-User/X-UI-Role из СЕССИИ (клиент их подделать не
+# может, см. proxy в ui/server.py). Оператор видит и трогает только свои
+# потоки, админ — все. Это защита от случайной порчи чужой работы, а не
+# от злоумышленника: у кого есть API-ключ агента, тот ходит напрямую и
+# видит всё — так и задумано, иначе перестали бы работать пульты и скрипты.
+def ui_ctx(x_ui_user: str = Header(default=""), x_ui_role: str = Header(default="")):
+    return {"user": (x_ui_user or "").strip(),
+            "role": (x_ui_role or "").strip().lower()}
+
+def can_see_all(ctx):
+    """Без заголовков панели (прямой доступ по API-ключу — пульт, скрипт) и у
+    админа ограничений нет."""
+    return (not ctx["user"]) or ctx["role"] == "admin"
+
+def owns(ctx, owner):
+    """Поток без владельца (создан до разграничения или напрямую через API)
+    доступен всем: иначе операторы разом потеряли бы доступ к тому, с чем
+    уже работают."""
+    return can_see_all(ctx) or not owner or owner == ctx["user"]
+
+def guard_stream(sid, ctx):
+    """Проверка доступа к конкретному потоку. Нужна на КАЖДОМ действии, а не
+    только в списке: без неё оператор, узнав id, мог бы стартовать, менять и
+    останавливать чужой поток — то есть ровно то, от чего защищаемся."""
+    if can_see_all(ctx):
+        return
+    with closing(db()) as c:
+        row = c.execute("SELECT owner FROM streams WHERE id=?", (sid,)).fetchone()
+    if row and not owns(ctx, row["owner"]):
+        raise HTTPException(403, "поток создан другим пользователем — "
+                                 "обратитесь к администратору")
+
 app = FastAPI(title="ad-streamer agent", dependencies=[Depends(auth)])
+
+# Единая точка контроля доступа к чужим потокам. Ставить проверку в каждый
+# эндпоинт по отдельности (их больше двадцати: старт, стоп, баннер, лого, OBS,
+# пресеты, громкость…) — значит рано или поздно забыть её в новом, и дыра
+# вернётся незаметно. Здесь же под защитой автоматически всё, что адресуется
+# как /api/streams/<id>/…, включая то, что появится потом.
+STREAM_PATH_RE = re.compile(r"^/api/streams/(\d+)(/|$)")
+
+@app.middleware("http")
+async def stream_access_guard(request, call_next):
+    m = STREAM_PATH_RE.match(request.url.path)
+    if m:
+        ctx = {"user": (request.headers.get("x-ui-user") or "").strip(),
+               "role": (request.headers.get("x-ui-role") or "").strip().lower()}
+        if not can_see_all(ctx):
+            with closing(db()) as c:
+                row = c.execute("SELECT owner FROM streams WHERE id=?",
+                                (int(m.group(1)),)).fetchone()
+            if row and not owns(ctx, row["owner"]):
+                return Response(
+                    content=json.dumps({"detail": "поток создан другим "
+                                        "пользователем — обратитесь к администратору"},
+                                       ensure_ascii=False),
+                    status_code=403, media_type="application/json")
+    return await call_next(request)
 
 @app.get("/api/ping")
 def ping():
@@ -1963,9 +2029,14 @@ def queue_move(qid: int, dir: str = Form(...)):
 
 # ---- потоки
 @app.get("/api/streams")
-def streams_list():
+def streams_list(ctx: dict = Depends(ui_ctx)):
     with closing(db()) as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM streams ORDER BY id")]
+    # оператор видит только свои потоки (и «ничьи» — созданные до
+    # разграничения либо напрямую через API); админ и прямой доступ по
+    # ключу — все
+    if not can_see_all(ctx):
+        rows = [r for r in rows if owns(ctx, r.get("owner"))]
     for r in rows:
         m = MIXERS.get(r["id"])
         r["status"] = m.status() if m else {"running": False, "playing": False, "ad_playing": False}
@@ -1978,7 +2049,8 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
                vcodec: str = Form("h264_nvenc"), vbitrate: str = Form("6000k"),
                fps: int = Form(25), autostart: int = Form(0),
                mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0"),
-               slate_banner_id: int = Form(0), yt_url: str = Form("")):
+               slate_banner_id: int = Form(0), yt_url: str = Form(""),
+               ctx: dict = Depends(ui_ctx)):
     for v, what in ((out_w, "кадр W"), (out_h, "кадр H"),
                     (banner_w, "баннер W"), (banner_h, "баннер H")):
         vnum(v, 16, 4096, what)
@@ -2026,12 +2098,12 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
     with closing(db()) as c, c:
         cur = c.execute("""INSERT INTO streams(name,input_url,output_url,out_w,out_h,
                            banner_w,banner_h,vcodec,vbitrate,fps,autostart,engine,
-                           mediamtx_enabled,audio_tracks,gst_slate_banner_id,yt_url)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'gstreamer',?,?,?,?)""",
+                           mediamtx_enabled,audio_tracks,gst_slate_banner_id,yt_url,owner)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,'gstreamer',?,?,?,?,?)""",
                         (name, input_url, output_url, out_w, out_h,
                          banner_w, banner_h, vcodec, vbitrate, fps, autostart,
                          mediamtx_enabled, audio_tracks, slate_banner_id or None,
-                         yt_url or None))
+                         yt_url or None, ctx["user"] or None))
         sid = cur.lastrowid
         if yt_url:
             # адрес релея известен только теперь — путь в MediaMTX строится по id

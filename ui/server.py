@@ -414,7 +414,11 @@ async def proxy(path: str, request: Request):
                      # кто из панели инициировал действие — агенту нужно только
                      # для /record/start (метка в БД записей), сервер-сайд
                      # значение из сессии, клиент подделать не может
-                     "X-UI-User": u["username"]})
+                     "X-UI-User": u["username"],
+                     # роль нужна агенту, чтобы разграничить потоки между
+                     # операторами: свои видит и трогает каждый, все — админ.
+                     # Значение server-side, из сессии — клиент подделать не может.
+                     "X-UI-Role": u.get("role") or ("admin" if u.get("is_admin") else "operator")})
     return Response(r.content, status_code=r.status_code,
                     media_type=r.headers.get("content-type"))
 
