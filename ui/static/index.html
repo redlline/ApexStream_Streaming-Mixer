@@ -777,6 +777,20 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
   </div>
 </dialog>
 
+<dialog id="ownerDlg">
+  <div style="padding:20px;display:flex;flex-direction:column;gap:10px;min-width:380px;max-width:520px">
+    <h3 style="margin:0">Владелец потока</h3>
+    <p class="muted" style="margin:0">Оператор видит и управляет только своими потоками. Назначьте поток тому, кто с ним работает — он сможет запускать, править и удалять его сам, не обращаясь к вам.</p>
+    <p id="odStream" style="margin:0;font-weight:600"></p>
+    <label class="f">оператор<select id="odUser" style="width:100%"></select></label>
+    <p class="muted" style="margin:0;font-size:12px">«— без владельца —» делает поток общим: его увидят все операторы.</p>
+    <div class="row" style="justify-content:flex-end;gap:6px">
+      <button class="btn gray" onclick="$('#ownerDlg').close()">Отмена</button>
+      <button class="btn" onclick="ownerApply()">Назначить</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="audioTracksDlg">
   <div style="padding:20px;display:flex;flex-direction:column;gap:10px;min-width:420px;max-width:620px">
     <h3 style="margin:0">Аудиодорожки источника</h3>
@@ -1480,6 +1494,17 @@ function programAckCurrent(){
   renderProgram();
 }
 // ---- streams
+// Кто прямо сейчас забирает выход потока. Типы приходят от MediaMTX как есть
+// (hlsMuxer, rtspConn, srtConn, webRTCSession) — переводим в понятное, иначе
+// подсказка выглядит как отладочный вывод.
+const READER_NAMES={hlsSession:"HLS",hlsMuxer:"HLS",hlsConn:"HLS",
+                    rtspSession:"RTSP",rtspConn:"RTSP",rtspsSession:"RTSPS",
+                    srtConn:"SRT",webRTCSession:"WebRTC",rtmpConn:"RTMP"};
+function readersHint(types){
+  const t=types||{};
+  const parts=Object.keys(t).map(k=>`${READER_NAMES[k]||k} ${t[k]}`);
+  return parts.length?parts.join(", "):TT("подключения");
+}
 let STREAMS_CACHE=[];
 async function loadStreams(){
   const list=await api("streams");
@@ -1487,12 +1512,17 @@ async function loadStreams(){
   $("#streamRows").innerHTML=list.map(s=>{
     const st=s.status||{},run=st.running;
     return `<tr><td>${esc(s.name)}</td>
-      ${IS_ADMIN?`<td class="muted">${s.owner?esc(s.owner):"—"}</td>`:""}
+      ${IS_ADMIN?`<td class="muted">
+        <span>${s.owner?esc(s.owner):"—"}</span>
+        ${s.assigned_by?`<br><span class="tag" title="${TT('поток передан администратором')}">${TT("назначен")}</span>`:""}
+        <br><button class="btn gray" style="padding:2px 7px;font-size:11px;margin-top:3px" onclick="ownerDlg(${s.id})">${TT("Назначить")}</button>
+      </td>`:""}
       <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.yt_url||s.input_url)}">${s.yt_url?"▶ YouTube: "+esc(s.yt_url):esc(s.input_url)}</td>
       <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${esc(s.output_url)}</td>
       <td><span class="tag ${run?"ok":"bad"}">${run?'<span class="dot"></span>В ЭФИРЕ':"остановлен"}</span>
           ${st.playing?`<span class="tag warn">баннер ${st.playing_left}c</span>`:""}
-          ${st.ad_playing?`<span class="tag warn">ролик в эфире</span>`:""}</td>
+          ${st.ad_playing?`<span class="tag warn">ролик в эфире</span>`:""}
+          ${run&&st.readers?`<span class="tag ok" title="${TT("сейчас забирают поток")}: ${readersHint(st.readers_by)}">👁 ${st.readers}</span>`:""}</td>
       <td>${s.logo_banner_id?'<span class="tag ok">включён</span>':'<span class="muted">нет</span>'}
         <button class="btn gray" style="padding:3px 8px" onclick="logoDlg(${s.id})">✎</button></td>
       <td>${run
@@ -2756,6 +2786,29 @@ async function presetActivate(pid){
 // разном порядке, и раньше настройка жила только на уровне потока: после
 // переключения входа в эфир уходила тишина, потому что дорожки с прежним
 // номером у нового источника не оказывалось.
+// ---- передача потока оператору (только для админа).
+// Оператор видит и трогает только свои потоки, поэтому «отдать канал» —
+// частая административная задача: человек вышел на смену, ему нужен доступ.
+let OWNER_SID=null;
+async function ownerDlg(sid){
+  const s=(STREAMS_CACHE||[]).find(x=>x.id===sid); if(!s)return;
+  OWNER_SID=sid;
+  $("#odStream").textContent=s.name+(s.owner?"  —  "+TT("сейчас у")+" "+s.owner:"  —  "+TT("без владельца"));
+  let users=[];
+  try{users=await req("/users")}catch{}
+  // viewer'ам поток отдавать бессмысленно — они всё равно ничего не изменят
+  const list=users.filter(u=>(u.role||"operator")!=="viewer");
+  $("#odUser").innerHTML=`<option value="">— ${TT("без владельца")} —</option>`
+    +list.map(u=>`<option value="${esc(u.username)}" ${s.owner===u.username?"selected":""}>${esc(u.username)}${u.role==="admin"?" ("+TT("админ")+")":""}</option>`).join("");
+  $("#ownerDlg").showModal();
+}
+async function ownerApply(){
+  if(!OWNER_SID)return;
+  const fd=new FormData();fd.append("owner",$("#odUser").value||"");
+  await api(`streams/${OWNER_SID}/owner`,{method:"POST",body:fd});
+  $("#ownerDlg").close();
+  loadStreams();
+}
 async function presetTracks(pid,cur,url){
   const sid=PRESETS_SID;if(!sid)return;
   // показываем реальный состав источника — угадывать номера не нужно

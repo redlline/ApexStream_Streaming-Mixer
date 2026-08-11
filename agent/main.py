@@ -251,6 +251,12 @@ def init_db():
             # доступны всем, иначе люди разом потеряли бы доступ к тому, с
             # чем уже работают.
             c.execute("ALTER TABLE streams ADD COLUMN owner TEXT")
+        if "assigned_by" not in cols:
+            # кто передал поток текущему владельцу. Пусто — оператор создал его
+            # сам. Нужно, чтобы в списке было видно «назначен»: у переданного
+            # потока другая история, и админу полезно помнить, что это его
+            # решение, а не работа самого оператора.
+            c.execute("ALTER TABLE streams ADD COLUMN assigned_by TEXT")
         vcols = [r["name"] for r in c.execute("PRAGMA table_info(videos)")]
         if "gain_db" not in vcols:
             # авто-нормализация громкости ролика (EBU R128-подобный анализ
@@ -704,6 +710,35 @@ def yt_relay_stop(sid):
 
 MEDIAMTX_API_PORT = int(os.environ.get("MEDIAMTX_API_PORT", "9997"))
 
+# Кто прямо сейчас забирает наш выход. Оператору важно понимать, смотрит ли
+# кто-то поток: без этого непонятно, ушёл он к зрителям или висит впустую.
+# Данные берём из MediaMTX (он знает всех своих читателей: HLS, RTSP, SRT,
+# WebRTC) и КЭШИРУЕМ на пару секунд — список потоков панель опрашивает часто,
+# и ходить в API на каждый поток отдельно было бы расточительно.
+_READERS_CACHE = {"ts": 0.0, "data": {}}
+
+def mediamtx_readers():
+    """{путь: {"count": N, "types": {"hlsMuxer": 2, ...}}} — кто читает сейчас."""
+    now = time.time()
+    if now - _READERS_CACHE["ts"] < 2.0:
+        return _READERS_CACHE["data"]
+    data = {}
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{MEDIAMTX_API_PORT}/v3/paths/list?itemsPerPage=1000")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            for item in json.loads(r.read().decode("utf-8", "replace")).get("items", []):
+                readers = item.get("readers") or []
+                types = {}
+                for rd in readers:
+                    t = rd.get("type", "?")
+                    types[t] = types.get(t, 0) + 1
+                data[item.get("name")] = {"count": len(readers), "types": types}
+    except Exception:
+        pass                      # MediaMTX недоступен — просто не показываем
+    _READERS_CACHE.update({"ts": now, "data": data})
+    return data
+
 def mediamtx_path_ready(path, timeout=3):
     """Готов ли путь в MediaMTX (данные пришли и разобраны).
 
@@ -1141,6 +1176,24 @@ class Mixer:
         if r.startswith("ERR"):
             raise RuntimeError(r)
 
+    def engine_status(self):
+        """Состояние ОТ САМОГО ДВИЖКА (ping по control-сокету).
+
+        status() выше собирается из полей агента и о внутренностях конвейера не
+        знает — например, о составе аудиодорожек входа. Для прямого приёма SRT
+        это единственный источник: порт слушает движок, и внешним ffprobe туда
+        не подключиться. Исключений не поднимаем: во время прогрева и рестарта
+        control-порт закрыт, и это нормально."""
+        if not self.alive():
+            return {}
+        try:
+            r = self._gst_ctl("ping", timeout=2.5)
+            if r.startswith("OK "):
+                return json.loads(r[3:])
+        except Exception:
+            pass
+        return {}
+
     def get_levels(self):
         empty = {"out_rms": -100.0, "ad_rms": -100.0, "mic_rms": -100.0, "obs_rms": -100.0}
         if not self.alive():
@@ -1290,7 +1343,11 @@ class Mixer:
         # отрицательный возраст
         out_age = (max(0, int(time.time() - self.mixer_progress_ts))
                    if self.alive() and self.mixer_progress_ts else None)
+        # сколько потребителей прямо сейчас забирают наш выход (см. mediamtx_readers)
+        rd = mediamtx_readers().get(self.mediamtx_path(), {}) if self.alive() else {}
         return {"running": self.alive(),
+                "readers": rd.get("count", 0),
+                "readers_by": rd.get("types", {}),
                 "playing": time.time() < self.playing_until,
                 "playing_left": max(0, int(self.playing_until - time.time())),
                 "ad_playing": self.ad_active,
@@ -2195,7 +2252,9 @@ def probe_audio(url: str = Form(...)):
     if is_srt_listen(url):
         for sid, m in list(MIXERS.items()):
             if m.cfg.get("input_url") == url and m.alive():
-                tracks = (m.status().get("input_audio") or [])
+                # именно engine_status(): состав дорожек знает только движок,
+                # в status() агента этого поля нет
+                tracks = (m.engine_status().get("input_audio") or [])
                 if tracks:
                     return {"ok": True, "tracks": tracks, "source": "движок"}
                 raise HTTPException(409, "поток запущен, но дорожки ещё не "
@@ -2380,6 +2439,34 @@ def stream_del(sid: int):
 # ---- пресеты входа: сохранённые URL источников для мгновенного переключения
 # (пульт оператора, п.1) — используют уже существующий бесшовный set_input,
 # просто дают ему быстрый доступ по кнопке вместо ручного ввода URL в форме.
+@app.post("/api/streams/{sid}/owner")
+def stream_set_owner(sid: int, owner: str = Form(""), ctx: dict = Depends(ui_ctx)):
+    """Передать поток оператору. Может только админ.
+
+    Оператор после этого работает с потоком как со своим — включая удаление:
+    раз поток на нём, он должен уметь и убрать его, не дёргая администратора.
+
+    Пустой owner снимает владельца: поток становится общим (виден всем) — так
+    же, как потоки, созданные до разграничения."""
+    # middleware пропускает админа и прямой доступ по ключу; здесь отсекаем
+    # оператора, который иначе мог бы переписать владельца на себя
+    if ctx["user"] and ctx["role"] != "admin":
+        raise HTTPException(403, "передавать потоки может только администратор")
+    owner = (owner or "").strip() or None
+    with closing(db()) as c, c:
+        row = c.execute("SELECT name, owner FROM streams WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "stream not found")
+        # «назначен» помечаем только когда владелец реально появился и это не
+        # он сам себе (админ по своей же кнопке) — иначе пометка врала бы
+        assigned = (ctx["user"] or "admin") if (owner and owner != ctx["user"]) else None
+        c.execute("UPDATE streams SET owner=?, assigned_by=? WHERE id=?",
+                  (owner, assigned, sid))
+    LOG.event(f"поток '{row['name']}': владелец "
+              + (f"{row['owner'] or '—'} → {owner}" if owner else "снят")
+              + (f" (назначил {ctx['user']})" if ctx["user"] else ""))
+    return {"ok": True, "owner": owner, "assigned_by": assigned}
+
 @app.post("/api/streams/{sid}/autofailover")
 def stream_autofailover(sid: int, enabled: int = Form(...)):
     with closing(db()) as c, c:
