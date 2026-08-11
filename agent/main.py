@@ -633,6 +633,30 @@ def stop_all_mediamtx(user_initiated=False):
 # Следит за релеем сам агент (тот же приём, что и с MediaMTX: _spawn/_kill_group),
 # а НЕ systemd — чтобы Старт/Стоп из панели не требовал давать adstreamer
 # sudo-прав на управление системными юнитами.
+# ---------------------------------------------------------------- прямой приём SRT
+# Обычный путь для энкодеров, которые умеют только SRT-caller, — через MediaMTX
+# (см. srtpush_info). Но MediaMTX разбирает поток сам и с некоторыми источниками
+# не справляется: со спутникового канала через Astra Cesbo он принимал все
+# 7.5 Мбит/с, а в путь клал только звук — видео молча выбрасывал, не сумев
+# разобрать параметры H264 (в API у трека оставалось width=0, height=0).
+# Проверено на живом канале: SRT-соединение показывало 7.49 Мбит/с приёма, а
+# путь прирастал на 0.69 Мбит/с.
+#
+# Для таких источников движок принимает SRT НАПРЯМУЮ: GStreamer разбирает
+# MPEG-TS сам и к таким потокам не придирается. Цена — отдельный порт на поток
+# и отсутствие промежуточной точки (превью до эфира, несколько читателей).
+SRT_LISTEN_PORT_BASE = int(os.environ.get("SRT_LISTEN_PORT_BASE", "17000"))
+
+def srt_listen_port(sid):
+    return SRT_LISTEN_PORT_BASE + sid
+
+def srt_listen_url(sid):
+    """Вход потока: движок сам слушает порт и ждёт, пока энкодер подключится."""
+    return f"srt://0.0.0.0:{srt_listen_port(sid)}?mode=listener"
+
+def is_srt_listen(url):
+    return "mode=listener" in (url or "")
+
 YT_RELAY_BIN = os.environ.get("YT_RELAY_BIN", "/usr/local/bin/yt-relay.sh")
 YT_RELAYS = {}            # sid -> процесс релея
 YT_RELAY_LOCK = threading.Lock()
@@ -678,23 +702,43 @@ def yt_relay_stop(sid):
         _kill_group(p)
         LOG.event(f"YouTube-релей остановлен для потока {sid}")
 
-def yt_ensure_ready(sid, url, timeout=45):
+MEDIAMTX_API_PORT = int(os.environ.get("MEDIAMTX_API_PORT", "9997"))
+
+def mediamtx_path_ready(path, timeout=3):
+    """Готов ли путь в MediaMTX (данные пришли и разобраны).
+
+    Спрашиваем сам MediaMTX, а не пробуем читать поток через ffprobe: он знает
+    ответ точно и отвечает мгновенно. Проба же на ТОЛЬКО ЧТО поднятом RTSP —
+    ненадёжный индикатор: ей нужно установить соединение, получить SDP и
+    набрать данные, и на свежем потоке она регулярно не укладывается в
+    таймаут. Именно поэтому старт YouTube-потока раньше вёл себя странно —
+    несколько раз подряд отказывал, а потом вдруг проходил."""
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{MEDIAMTX_API_PORT}/v3/paths/get/{urllib.parse.quote(path)}")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return bool(json.loads(r.read().decode("utf-8", "replace")).get("ready"))
+    except Exception:
+        return False
+
+def yt_ensure_ready(sid, url, timeout=60):
     """Поднять релей и дождаться, пока поток реально появится в MediaMTX.
-    Возвращает (ok, detail). Ждать обязательно: резолв ссылки через yt-dlp
-    занимает несколько секунд, и до этого пути ещё не существует — обычная
-    проверка входа отвалилась бы с 404 и старт был бы отклонён."""
+    Возвращает (ok, detail). Ждать обязательно: yt-dlp резолвит ссылку
+    несколько секунд, и до этого пути ещё не существует."""
     yt_relay_start(sid, url)
+    path = yt_path(sid)
     deadline = time.time() + timeout
-    last = "нет сигнала"
     while time.time() < deadline:
-        ok, detail = check_input(yt_input_url(sid), timeout=4)
-        if ok:
+        if mediamtx_path_ready(path):
+            # путь готов — даём потоку мгновение набрать буфер, чтобы
+            # следующий за этим запуск движка не начинался с пустоты
+            time.sleep(1.5)
             return True, "поток получен"
-        last = detail
         if not yt_relay_alive(sid):
             return False, "релей не запустился (проверьте ссылку и журнал потока)"
-        time.sleep(3)
-    return False, f"YouTube не отдал поток за {timeout}с — идёт ли трансляция? ({last})"
+        time.sleep(1)
+    return False, (f"YouTube не отдал поток за {timeout}с — идёт ли трансляция? "
+                   f"(ссылка верная?)")
 
 def yt_relay_watchdog():
     """Скрипт релея переживает протухание ссылки сам (внутренний цикл), но если
@@ -882,7 +926,12 @@ class Mixer:
         # с более точным пробингом (SAR/выбор лучшей рендиции) это стало
         # происходить систематически и путало оператора: «в настройках 1080p,
         # а на выходе всё равно SD».
-        params = probe_input_params(self.cfg["input_url"])
+        # У прямого приёма SRT пробовать нечего: порт слушаем МЫ, и пока
+        # энкодер не подключился, ffprobe просто висел бы до таймаута на каждом
+        # старте. Параметры возьмём из настроек потока — движок впишет любой
+        # входящий кадр в заданный канвас.
+        params = (None if is_srt_listen(self.cfg["input_url"])
+                  else probe_input_params(self.cfg["input_url"]))
         if params:
             params.pop("out_w", None)
             params.pop("out_h", None)
@@ -1755,6 +1804,11 @@ def srtpush_info():
             "running": mediamtx_alive("ll"),
             "srt_port": port,
             "rtsp_port": rtsp,
+            # прямой приём: движок слушает свой порт на каждый поток. Точный
+            # порт известен только после создания потока (зависит от его id),
+            # поэтому отдаём базу — панель показывает её в подсказке.
+            "direct_port_base": SRT_LISTEN_PORT_BASE,
+            "direct_tpl": f"srt://{{host}}:{{port}}",
             # что вбить в энкодер (адрес НАШЕГО сервера + publish)
             "publish_tpl": f"srt://{{host}}:{port}?streamid=publish:{{id}}",
             # Что подставить в input_url потока (движок рядом с MediaMTX →
@@ -2050,7 +2104,7 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
                fps: int = Form(25), autostart: int = Form(0),
                mediamtx_enabled: int = Form(1), audio_tracks: str = Form("0"),
                slate_banner_id: int = Form(0), yt_url: str = Form(""),
-               ctx: dict = Depends(ui_ctx)):
+               srt_direct: int = Form(0), ctx: dict = Depends(ui_ctx)):
     for v, what in ((out_w, "кадр W"), (out_h, "кадр H"),
                     (banner_w, "баннер W"), (banner_h, "баннер H")):
         vnum(v, 16, 4096, what)
@@ -2076,6 +2130,11 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
             raise HTTPException(400, "источник YouTube требует включённой "
                                      "отдачи через MediaMTX — через неё идёт релей")
         input_url = "-"          # плейсхолдер, заменится ниже на адрес релея
+    elif srt_direct:
+        # Прямой приём SRT: движок слушает свой порт сам, минуя MediaMTX.
+        # Порт зависит от id потока, поэтому реальный адрес подставим после
+        # INSERT — здесь только плейсхолдер.
+        input_url = "-"
     # выход обязателен, ЕСЛИ поток никуда больше не публикуется — без него и
     # без MediaMTX эфира просто не будет
     if not output_url and not (MEDIAMTX_ENABLED and mediamtx_enabled):
@@ -2109,6 +2168,10 @@ def stream_add(name: str = Form(...), input_url: str = Form(...), output_url: st
             # адрес релея известен только теперь — путь в MediaMTX строится по id
             c.execute("UPDATE streams SET input_url=? WHERE id=?",
                       (yt_input_url(sid), sid))
+        elif srt_direct:
+            # порт прямого приёма тоже зависит от id
+            c.execute("UPDATE streams SET input_url=? WHERE id=?",
+                      (srt_listen_url(sid), sid))
     return {"id": sid}
 
 @app.post("/api/probeaudio")
@@ -2479,16 +2542,24 @@ def stream_start(sid: int):
     # YouTube: вход указывает на локальный релей, и до его запуска пути ещё нет —
     # обычная проверка ниже отвалилась бы с 404. Поднимаем релей и ждём сигнала
     # ПЕРЕД проверкой, а оператору отдаём внятную причину, если не дождались.
-    if (row["yt_url"] or "").strip():
+    is_yt = bool((row["yt_url"] or "").strip())
+    if is_yt:
         ok, detail = yt_ensure_ready(sid, row["yt_url"].strip())
         if not ok:
             yt_relay_stop(sid)
             LOG.event(f"старт потока '{row['name']}' отклонён: {detail}", "error")
             raise HTTPException(409, f"YouTube: {detail}")
-    ok, detail = check_input(row["input_url"])
-    if not ok:
-        LOG.event(f"старт потока '{row['name']}' отклонён: вход недоступен ({detail})", "error")
-        raise HTTPException(400, f"вход от провайдера недоступен: {detail}")
+    # Пробу входа пропускаем в двух случаях:
+    #  • YouTube — MediaMTX уже подтвердил готовность, а ffprobe по свежему
+    #    RTSP регулярно не укладывается в таймаут и отклонял бы готовый поток;
+    #  • прямой приём SRT — там МЫ слушаем порт, и пока энкодер не подключился,
+    #    проверять нечего. Ждать его здесь нельзя: движок для того и слушает,
+    #    чтобы принять сигнал в любой момент, а до тех пор показывать заглушку.
+    if not is_yt and not is_srt_listen(row["input_url"]):
+        ok, detail = check_input(row["input_url"])
+        if not ok:
+            LOG.event(f"старт потока '{row['name']}' отклонён: вход недоступен ({detail})", "error")
+            raise HTTPException(400, f"вход от провайдера недоступен: {detail}")
     # два НАШИХ потока на один и тот же выход — тоже конфликт (у пользователя
     # несколько каналов-профилей целятся в один stream_ad_1: работать должен
     # один). Пустой output_url (поток только через MediaMTX) в конфликт не

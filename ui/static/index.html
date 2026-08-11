@@ -522,6 +522,10 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f" id="stInYtWrap" style="display:none">ссылка на YouTube<input id="stInYt" placeholder="https://www.youtube.com/@канал/live" style="width:280px"></label>
       <label class="f" id="stInPullWrap">входящий (от провайдера)<span class="row"><input id="stIn" placeholder="http://provider/stream.m3u8" style="width:260px"><button type="button" class="btn gray" onclick="checkInputUrl('stIn','stInCheck')">Проверить</button></span></label>
       <label class="f" id="stInPushWrap" style="display:none">streamid (задаёте сами)<input id="stInPushId" placeholder="astra1" style="width:160px" oninput="stPushHintRender()"></label>
+      <label class="f" id="stInPushModeWrap" style="display:none">способ приёма<select id="stInPushMode" onchange="stPushHintRender()">
+        <option value="mtx">через MediaMTX (обычный)</option>
+        <option value="direct">напрямую движком (капризный источник)</option>
+      </select></label>
       <label class="f">исходящий (publish во Flussonic, необязательно)<input id="stOut" placeholder="rtmp://127.0.0.1:1935/live/ch1_ads" style="width:300px"></label>
       <label class="f">кадр Ш×В<span class="row"><input id="stOW" type="number" value="1920" style="width:80px"><input id="stOH" type="number" value="1080" style="width:80px"></span></label>
       <label class="f">баннер Ш×В<span class="row"><input id="stW" type="number" value="1920" style="width:80px"><input id="stH" type="number" value="150" style="width:70px"></span></label>
@@ -1697,6 +1701,7 @@ async function stInModeChange(){
   const push=mode==="push", yt=mode==="yt";
   $("#stInPullWrap").style.display=(push||yt)?"none":"";
   $("#stInPushWrap").style.display=push?"":"none";
+  $("#stInPushModeWrap").style.display=push?"":"none";
   $("#stPushHint").style.display=push?"":"none";
   $("#stInYtWrap").style.display=yt?"":"none";
   $("#stYtHint").style.display=yt?"":"none";
@@ -1705,6 +1710,15 @@ async function stInModeChange(){
 async function stPushHintRender(){
   const info=await srtInfo(),host=agentSrtHost();
   const id=($("#stInPushId").value||"").trim();
+  const direct=$("#stInPushMode")&&$("#stInPushMode").value==="direct";
+  // прямой приём: слушает сам движок, MediaMTX не участвует и streamid не нужен
+  $("#stInPushWrap").style.display=direct?"none":"";
+  if(direct){
+    const base=(info&&info.direct_port_base)||17000;
+    $("#stPushUrl").value=`srt://${host||"<адрес сервера>"}:${base}+№потока`;
+    $("#stPushInput").textContent=TT("Точный порт зависит от номера потока — покажу сразу после создания. В Astra: SRT MODE = Caller, Stream ID оставьте пустым.");
+    return;
+  }
   if(!info||!info.enabled){
     $("#stPushUrl").value="";
     $("#stPushInput").textContent=TT("На этом сервере приём SRT (MediaMTX) выключен — режим push недоступен.");
@@ -1716,7 +1730,7 @@ async function stPushHintRender(){
     +(info.running?"":"  ⚠ "+TT("MediaMTX сейчас не запущен"));
 }
 async function streamAdd(){
-  let inputUrl, ytUrl="";
+  let inputUrl, ytUrl="", srtDirect=0;
   if($("#stInMode").value==="yt"){
     ytUrl=($("#stInYt").value||"").trim();
     if(!ytUrl)return alert(TT("Вставьте ссылку на YouTube-трансляцию"));
@@ -1727,6 +1741,10 @@ async function streamAdd(){
     // вход подставит агент: он указывает на локальный релей, а не на саму
     // ссылку (она временная и через несколько часов протухает)
     inputUrl="-";
+  }else if($("#stInMode").value==="push"&&$("#stInPushMode").value==="direct"){
+    // прямой приём: порт слушает сам движок, streamid не нужен — адрес
+    // зависит от номера потока и станет известен после создания
+    inputUrl="-"; srtDirect=1;
   }else if($("#stInMode").value==="push"){
     const id=($("#stInPushId").value||"").trim();
     if(!id)return alert(TT("Укажите streamid — то же имя, что впишете в Astra"));
@@ -1750,7 +1768,15 @@ async function streamAdd(){
   fd.append("mediamtx_enabled",$("#stMtx").checked?1:0);
   fd.append("slate_banner_id",$("#stSlate").value||0);
   if(ytUrl)fd.append("yt_url",ytUrl);
-  await api("streams",{method:"POST",body:fd});
+  if(srtDirect)fd.append("srt_direct","1");
+  const created=await api("streams",{method:"POST",body:fd});
+  if(srtDirect){
+    // порт стал известен только сейчас — показываем готовый адрес для энкодера
+    const info=await srtInfo();
+    const base=(info&&info.direct_port_base)||17000;
+    const addr=`srt://${agentSrtHost()||"адрес-сервера"}:${base+created.id}`;
+    prompt(TT("Впишите этот адрес в энкодер (SRT MODE = Caller, Stream ID пустой):"),addr);
+  }
   $("#stInCheck").textContent="";
   loadStreams();
 }
