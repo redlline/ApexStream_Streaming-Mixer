@@ -2189,6 +2189,19 @@ def probe_audio(url: str = Form(...)):
     url = (url or "").strip()
     if not url:
         raise HTTPException(400, "укажите URL")
+    # Прямой приём SRT: порт слушает САМ движок, и внешний ffprobe к нему не
+    # подключится — вторая попытка открыть тот же адрес даёт «Address already
+    # in use». Состав дорожек спрашиваем у движка: он этот поток уже разобрал.
+    if is_srt_listen(url):
+        for sid, m in list(MIXERS.items()):
+            if m.cfg.get("input_url") == url and m.alive():
+                tracks = (m.status().get("input_audio") or [])
+                if tracks:
+                    return {"ok": True, "tracks": tracks, "source": "движок"}
+                raise HTTPException(409, "поток запущен, но дорожки ещё не "
+                                         "определены — подождите пару секунд")
+        raise HTTPException(409, "прямой приём SRT: состав дорожек виден, только "
+                                 "когда поток запущен и энкодер подключён")
     if not shutil.which(FFPROBE):
         raise HTTPException(503, "ffprobe недоступен на сервере")
     try:

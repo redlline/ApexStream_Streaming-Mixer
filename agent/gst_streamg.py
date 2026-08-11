@@ -109,6 +109,11 @@ class StreamG:
         # видят все дорожки мультиязыка одинаково подписанными "a1" с разными
         # PID и непонятно, где какой язык (см. _srt_out_build).
         self.track_languages = []
+        # состав аудиодорожек входа, собранный самим конвейером (см.
+        # _on_decodebin_pad_added). Для прямого приёма SRT это единственный
+        # способ узнать состав: порт слушаем мы, и внешний ffprobe к нему не
+        # подключится — «Address already in use».
+        self.input_audio_info = []
         self.buffer_sec = float(buffer_sec)
         self.slate = slate                    # путь к PNG-заглушке (или None)
         self.w, self.h, self.fps = w, h, fps
@@ -433,6 +438,19 @@ class StreamG:
         elif kind.startswith("audio/"):
             idx = state["audio_seen"]          # порядковый номер входной дорожки
             state["audio_seen"] += 1
+            # Запоминаем состав аудиодорожек ВХОДА. Нужен панели, чтобы оператор
+            # выбирал дорожку осознанно. Раньше состав узнавали внешним ffprobe,
+            # но с прямым приёмом SRT это невозможно: порт слушаем мы, и вторая
+            # попытка открыть его даёт «Address already in use». Здесь же данные
+            # берутся из самого конвейера — он этот поток уже разобрал.
+            st = caps.get_structure(0)
+            ok_ch, ch = st.get_int("channels")
+            info = {"n": idx, "channels": ch if ok_ch else None,
+                    "language": "", "title": "", "codec": ""}
+            self.input_audio_info.append(info)
+            # язык приходит отдельным событием-тегом, иногда позже самих caps
+            pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM,
+                          self._audio_tag_probe, info)
             # если эту дорожку тащим — линкуем к очереди её ПОЗИЦИИ в выходе
             if idx in state["aq_by_track"]:
                 sinkpad = state["aq_by_track"][idx].get_static_pad("sink")
@@ -440,6 +458,25 @@ class StreamG:
                     pad.link(sinkpad)
             # незапрошенные audio-дорожки намеренно НЕ линкуются — decodebin
             # держит их пэд без потребителя, это штатно и не мешает пайплайну
+
+    def _audio_tag_probe(self, pad, probe_info, info):
+        """Язык дорожки приходит тегом, иногда позже caps — дописываем на месте."""
+        ev = probe_info.get_event()
+        if ev and ev.type == Gst.EventType.TAG:
+            try:
+                tl = ev.parse_tag()
+                ok, lang = tl.get_string("language-code")
+                if ok and lang:
+                    info["language"] = lang
+                ok, title = tl.get_string("title")
+                if ok and title:
+                    info["title"] = title
+                ok, codec = tl.get_string("audio-codec")
+                if ok and codec:
+                    info["codec"] = codec
+            except Exception:
+                pass
+        return Gst.PadProbeReturn.OK
 
     def _on_decodebin_no_more_pads(self, _d, state):
         """decodebin сигналит, что ВСЕ пэды источника уже перечислены (больше
@@ -470,6 +507,9 @@ class StreamG:
     # ---------------- управление входом
     def _build_input(self):
         self.in_started_at = time.time()
+        # состав дорожек пересобирается вместе со входом: при смене источника
+        # он другой, и старый список ввёл бы оператора в заблуждение
+        self.input_audio_info = []
         self.p_in = Gst.parse_launch(self._in_desc())
         bus = self.p_in.get_bus()
         bus.add_signal_watch()
@@ -2083,6 +2123,12 @@ class StreamG:
         _srt_out_build, чтобы промаркировать каждую дорожку в PMT мультиязыка —
         иначе Flussonic/плееры видят все дорожки одинаково подписанными "a1"
         с разными PID, и непонятно, где какой язык."""
+        # При прямом приёме SRT порт слушаем МЫ — второй ffprobe на тот же
+        # адрес получит «Address already in use» и ничего не вернёт. Языки в
+        # этом случае берём из тегов самого конвейера (см. _audio_tag_probe).
+        if "mode=listener" in (self.input_url or ""):
+            self.track_languages = [t.get("language", "") for t in self.input_audio_info]
+            return
         try:
             p = subprocess.run(
                 ["ffprobe", "-v", "error", "-select_streams", "a",
@@ -2258,6 +2304,9 @@ class StreamG:
                 "html_busy": self.html_busy, "mic_on": self.mic_bin is not None,
                 "obs_connected": self.obs_bin is not None,
                 "obs_live": self.obs_is_live,
+                # состав аудиодорожек входа — панели, чтобы показать их
+                # оператору без внешнего ffprobe (см. _on_decodebin_pad_added)
+                "input_audio": self.input_audio_info,
                 "error": self.last_error}
 
 
