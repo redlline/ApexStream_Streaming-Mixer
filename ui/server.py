@@ -396,6 +396,265 @@ async def agents_test(aid: int, request: Request):
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
 
+# ---------------- синхронизация потоков между серверами
+# Панель — единственное место, которое знает про все агенты сразу (у каждого
+# своя база и свой ключ), поэтому копирование потоков живёт здесь, а не в
+# агенте.
+#
+# Потоки на разных серверах сопоставляются ПО ИМЕНИ: id у них независимые и
+# совпадать не могут. Одноимённый поток на цели обновляется, отсутствующий —
+# создаётся.
+#
+# Копируется ВСЁ: параметры кадра и кодека, выход во Flussonic, вход,
+# логотип с его координатами, буфер и заглушка. Картинки логотипа и заглушки
+# переносятся физически (файл скачивается с исходного агента и заливается в
+# медиатеку целевого, если там нет одноимённого) — id медиатек у серверов
+# независимы, поэтому сопоставляем по имени файла, как и сами потоки.
+#
+# ЕДИНСТВЕННОЕ исключение — autostart: копия создаётся ОСТАНОВЛЕННОЙ и никогда
+# не поднимается сама. Иначе после синхронизации два сервера немедленно начали
+# бы публиковать в один и тот же адрес Flussonic и рвали бы эфир друг другу.
+# Запускать копию — ручное решение оператора.
+#
+# Отдельный случай — вход SRT-push (прямой приём) и YouTube. В input_url там
+# лежит служебный адрес, собранный из НОМЕРА потока (порт 17000+id, путь ytN),
+# и на цели номер будет другой. Копируется сам источник: для YouTube — ссылка
+# (yt_url), для прямого SRT — режим (srt_direct), а рабочий адрес агент цели
+# собирает под своим номером. Новый адрес для энкодера видно в карточке потока.
+SYNC_FIELDS = ("out_w", "out_h", "banner_w", "banner_h", "vcodec", "vbitrate",
+               "fps", "mediamtx_enabled", "audio_tracks")
+
+def _agent_by_id(aid):
+    with closing(db()) as c:
+        row = c.execute("SELECT * FROM agents WHERE id=?", (aid,)).fetchone()
+    return dict(row) if row else None
+
+async def _agent_call(client, agent, method, path, **kw):
+    # ключ агента подставляем всегда, но вызывающий может добавить свои
+    # заголовки (X-UI-*) — их нельзя терять и нельзя дублировать kwarg
+    headers = {"X-API-Key": agent["api_key"], **(kw.pop("headers", None) or {})}
+    return await client.request(method, f"{agent['url']}/api/{path}",
+                                headers=headers, **kw)
+
+def _stream_payload(s):
+    """Поля потока для создания/обновления на другом сервере."""
+    data = {k: str(s.get(k) if s.get(k) is not None else "") for k in SYNC_FIELDS}
+    data["name"] = s["name"]
+    data["output_url"] = s.get("output_url") or ""
+    # копия всегда создаётся остановленной (см. комментарий к SYNC_FIELDS)
+    data["autostart"] = "0"
+    yt = (s.get("yt_url") or "").strip()
+    src = (s.get("input_url") or "")
+    if yt:
+        data["yt_url"] = yt
+        data["input_url"] = "-"
+    elif "mode=listener" in src:
+        # порт зависит от id — пусть агент цели назначит свой
+        data["srt_direct"] = "1"
+        data["input_url"] = "-"
+    else:
+        data["input_url"] = src
+    return data
+
+async def _copy_banner(client, src_agent, dst_agent, bid, src_banners, cache):
+    """Перенести картинку из медиатеки исходного агента в медиатеку целевого.
+    Возвращает id на цели (или None). Одноимённая картинка не дублируется —
+    считаем, что это она и есть."""
+    if not bid:
+        return None
+    if bid in cache:
+        return cache[bid]
+    src = src_banners.get(int(bid))
+    if not src:
+        cache[bid] = None
+        return None
+    name = src.get("name") or src.get("filename") or f"banner{bid}"
+    r = await _agent_call(client, dst_agent, "GET", "banners")
+    for b in r.json():
+        if (b.get("name") or "") == name:
+            cache[bid] = b["id"]
+            return b["id"]
+    fr = await _agent_call(client, src_agent, "GET", f"banners/{bid}/file")
+    fr.raise_for_status()
+    # расширение важно: агент принимает только .gif/.png и определяет тип по нему
+    ext = os.path.splitext(src.get("filename") or "")[1].lower() or ".png"
+    up = await _agent_call(client, dst_agent, "POST", "banners",
+                           files={"file": ("copy" + ext, fr.content)},
+                           data={"name": name})
+    up.raise_for_status()
+    cache[bid] = up.json()["id"]
+    return cache[bid]
+
+async def _copy_extras(client, src_agent, dst_agent, s, tgt_id, src_banners,
+                       cache, uh, errors):
+    """Логотип (с координатами), буфер и заглушка — они живут не в полях
+    потока, а в отдельных ручках агента, поэтому копируются вторым шагом."""
+    try:
+        logo = await _copy_banner(client, src_agent, dst_agent,
+                                  s.get("logo_banner_id"), src_banners, cache)
+        if logo:
+            d = {"banner_id": str(logo), "x": str(s.get("logo_x") or 20),
+                 "y": str(s.get("logo_y") or 20)}
+            # w/h заданы только если логотип двигали по превью вручную —
+            # иначе агент сам считает размер, и пустые значения ему слать нельзя
+            if s.get("logo_w") and s.get("logo_h"):
+                d["w"] = str(s["logo_w"]); d["h"] = str(s["logo_h"])
+            await _agent_call(client, dst_agent, "POST", f"streams/{tgt_id}/logo",
+                              data=d, headers=uh)
+        elif s.get("logo_banner_id"):
+            errors.append(f"{s['name']}: логотип не перенесён")
+    except Exception as e:
+        errors.append(f"{s['name']}: логотип — {str(e)[:60]}")
+    try:
+        slate = await _copy_banner(client, src_agent, dst_agent,
+                                   s.get("gst_slate_banner_id"), src_banners, cache)
+        if s.get("gst_buffer_enabled") or slate:
+            await _agent_call(client, dst_agent, "POST", f"streams/{tgt_id}/gstbuffer",
+                              data={"enabled": "1" if s.get("gst_buffer_enabled") else "0",
+                                    "buffer_sec": str(s.get("gst_buffer_sec") or 12),
+                                    "slate_banner_id": str(slate or 0)}, headers=uh)
+    except Exception as e:
+        errors.append(f"{s['name']}: заглушка — {str(e)[:60]}")
+
+def _ui_headers(user):
+    # агент по этим заголовкам решает, что оператору видно и что он вправе
+    # менять: без них панель работала бы от имени «прямого доступа по ключу»,
+    # то есть с правами администратора
+    return {"X-UI-User": user["username"], "X-UI-Role": user.get("role") or "admin"}
+
+async def sync_streams_to(streams, target_ids, user, src_agent):
+    """Скопировать потоки на указанные серверы. Возвращает отчёт по каждому."""
+    report = []
+    uh = _ui_headers(user)
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            r = await _agent_call(client, src_agent, "GET", "banners")
+            src_banners = {b["id"]: b for b in r.json()}
+        except Exception:
+            src_banners = {}
+        for aid in target_ids:
+            agent = _agent_by_id(aid)
+            if not agent:
+                continue
+            res = {"agent": agent["name"], "created": 0, "updated": 0, "errors": []}
+            # id уже перенесённых картинок: один логотип на десяти потоках
+            # заливается один раз, а не десять
+            bcache = {}
+            try:
+                r = await _agent_call(client, agent, "GET", "streams", headers=uh)
+                existing = {x["name"]: x for x in r.json()}
+            except Exception as e:
+                res["errors"].append(f"нет связи: {str(e)[:70]}")
+                report.append(res)
+                continue
+            for s in streams:
+                data = _stream_payload(s)
+                try:
+                    tgt = existing.get(s["name"])
+                    if tgt:
+                        # у существующего потока yt_url/srt_direct не трогаем:
+                        # адрес там уже собран под его собственный номер
+                        upd = {k: v for k, v in data.items()
+                               if k not in ("yt_url", "srt_direct")}
+                        # "-" — заглушка вместо адреса, который агент собирает
+                        # сам при СОЗДАНИИ (srt_direct/yt_url). У PUT таких
+                        # параметров нет, поэтому вход существующего потока
+                        # оставляем как есть — иначе он превратился бы в "-"
+                        if upd["input_url"] == "-"                            or "mode=listener" in (tgt.get("input_url") or "")                            or (tgt.get("yt_url") or ""):
+                            upd["input_url"] = tgt["input_url"]
+                        # автостарт уже работающей копии не сбрасываем: её
+                        # однажды запустили осознанно, синхронизация настроек
+                        # не повод её глушить
+                        upd["autostart"] = str(tgt.get("autostart") or 0)
+                        rr = await _agent_call(client, agent, "PUT",
+                                               f"streams/{tgt['id']}", data=upd,
+                                               headers=uh)
+                        if rr.status_code < 300:
+                            res["updated"] += 1
+                            await _copy_extras(client, src_agent, agent, s, tgt["id"],
+                                               src_banners, bcache, uh, res["errors"])
+                        else:
+                            res["errors"].append(f"{s['name']}: {rr.text[:90]}")
+                    else:
+                        # владелец на цели ставится по тому, кто синхронизировал
+                        # (заголовки X-UI-*). Переносить владельца исходного
+                        # потока нельзя — на другом сервере это был бы чужой
+                        # логин без ведома администратора
+                        rr = await _agent_call(client, agent, "POST", "streams",
+                                               data=data, headers=uh)
+                        if rr.status_code < 300:
+                            res["created"] += 1
+                            await _copy_extras(client, src_agent, agent, s,
+                                               rr.json()["id"], src_banners,
+                                               bcache, uh, res["errors"])
+                        else:
+                            res["errors"].append(f"{s['name']}: {rr.text[:90]}")
+                except Exception as e:
+                    res["errors"].append(f"{s['name']}: {str(e)[:70]}")
+            report.append(res)
+    return report
+
+@app.post("/sync/streams")
+async def sync_streams(request: Request):
+    """Скопировать потоки на другие серверы (копия создаётся остановленной).
+    body: {stream_ids: [..] | all: true, targets: [id..]}"""
+    u = require_operator(request)
+    body = await request.json()
+    targets = [int(t) for t in (body.get("targets") or [])]
+    if not targets:
+        raise HTTPException(400, "не выбрано ни одного сервера")
+    src_agent = get_agent(request)
+    targets = [t for t in targets if t != src_agent["id"]]   # себя не копируем
+    if not targets:
+        raise HTTPException(400, "выбран только текущий сервер — копировать некуда")
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await _agent_call(client, src_agent, "GET", "streams",
+                              headers=_ui_headers(u))
+        allst = r.json()
+    ids = body.get("stream_ids")
+    streams = allst if body.get("all") else [s for s in allst if s["id"] in set(ids or [])]
+    if not streams:
+        raise HTTPException(400, "нечего копировать")
+    report = await sync_streams_to(streams, targets, u, src_agent)
+    audit(u["username"], "POST", f"/sync/streams({len(streams)}→{len(targets)})")
+    return {"ok": True, "report": report}
+
+@app.post("/sync/delete")
+async def sync_delete(request: Request):
+    """Удалить одноимённый поток на других серверах. body: {name, targets:[id..]}"""
+    u = require_operator(request)
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    targets = [int(t) for t in (body.get("targets") or [])]
+    if not name or not targets:
+        raise HTTPException(400, "нужно имя потока и хотя бы один сервер")
+    src = get_agent(request)
+    report = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        for aid in targets:
+            if aid == src["id"]:
+                continue
+            agent = _agent_by_id(aid)
+            if not agent:
+                continue
+            res = {"agent": agent["name"], "deleted": 0, "errors": []}
+            try:
+                r = await _agent_call(client, agent, "GET", "streams",
+                                      headers=_ui_headers(u))
+                for s in r.json():
+                    if s["name"] == name:
+                        rr = await _agent_call(client, agent, "DELETE",
+                                               f"streams/{s['id']}", headers=_ui_headers(u))
+                        if rr.status_code < 300:
+                            res["deleted"] += 1
+                        else:
+                            res["errors"].append(rr.text[:90])
+            except Exception as e:
+                res["errors"].append(str(e)[:70])
+            report.append(res)
+    audit(u["username"], "POST", f"/sync/delete({name})")
+    return {"ok": True, "report": report}
+
 # ---------------- proxy to selected agent
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy(path: str, request: Request):

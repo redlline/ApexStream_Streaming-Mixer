@@ -535,6 +535,7 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <label class="f">аудиодорожки входа<span class="row"><input id="stAudioTracks" value="0" placeholder="0 или 0,1,2" style="width:110px"><button type="button" class="btn gray" onclick="audioTracksDlg('st')">🎚 Дорожки</button></span></label>
       <label class="f">заглушка при обрыве<select id="stSlate" style="max-width:180px"><option value="0">— без заглушки —</option></select></label>
       <label class="f"><span>&nbsp;</span><label><input type="checkbox" id="stMtx" checked> отдавать через MediaMTX (RTSP/HLS/SRT/WebRTC)</label></label>
+      <label class="f" id="stSyncWrap" style="display:none"><span>&nbsp;</span><label><input type="checkbox" id="stSync" onchange="syncTargetsToggle()"> создать и на других серверах</label></label>
       <button class="btn" onclick="streamAdd()">Добавить</button>
     </div>
     <div id="stPushHint" style="display:none;margin:10px 0 0;padding:10px 12px;background:#151b28;border:1px solid var(--line);border-radius:8px">
@@ -544,6 +545,15 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
         <button type="button" class="btn gray" onclick="copyPresetUrl(this,$('#stPushUrl').value)">📋 Скопировать</button>
       </div>
       <div id="stPushInput" class="muted" style="font-size:11px;margin-top:6px"></div>
+    </div>
+    <div id="stSyncBox" style="display:none;margin:10px 0 0;padding:10px 12px;background:#151b28;border:1px solid var(--line);border-radius:8px">
+      <div style="font-size:12px;color:var(--mut);margin-bottom:6px">Отметьте серверы, на которых создать такой же поток:</div>
+      <div id="stSyncList" class="row" style="gap:14px"></div>
+      <div class="muted" style="font-size:11px;margin-top:6px">
+        Копируются все настройки, включая выход во Flussonic. <b>Копия создаётся
+        остановленной</b> — два сервера, публикующие в один адрес, рвали бы эфир друг другу.
+        Запустить её можно вручную.
+      </div>
     </div>
     <div id="stYtHint" style="display:none;margin:10px 0 0;padding:10px 12px;background:#151b28;border:1px solid var(--line);border-radius:8px">
       <div style="font-size:12px;color:var(--mut)">
@@ -563,7 +573,9 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
     <p class="muted" style="margin:6px 0 0"><b>Аудиодорожки:</b> <b>первый номер уходит в эфир</b> — если провайдер ставит первой служебную дорожку (интершум, чистый звук стадиона), укажите здесь номер нужной, например «1». Кнопка «🎚 Дорожки» покажет, что реально отдаёт источник, с языками — угадывать номера не нужно. Несколько через запятую («1,0,2») — <b>мультиязык</b>: первая в эфир, остальные уходят в MediaMTX по SRT дополнительными дорожками (Flussonic тянет их все по <code>srt://…?streamid=read:sgN</code>), реклама звучит одним общим звуком на всех языках. Мультиязык требует включённого MediaMTX.</p>
     <p id="stInCheck" class="muted" style="margin:6px 0 0"></p>
   </div>
-  <div class="card"><h3>Потоки</h3>
+  <div class="card">
+    <h3 style="display:flex;align-items:center;gap:10px">Потоки
+      <button class="btn gray" id="syncAllBtn" style="margin-left:auto;padding:3px 10px;display:none" onclick="syncAllDlg()">⇄ Синхронизировать сейчас</button></h3>
     <p class="muted" style="margin-top:0">Старт/Стоп/Рестарт управляют реальным GStreamer-процессом на сервере с Flussonic: он принимает вход от провайдера, накладывает баннер/логотип/ролик/HTML и публикует результат во Flussonic. Статус читается напрямую с процесса, а не из базы — что видите, то и происходит на сервере. Перед стартом агент сам проверяет, отвечает ли провайдер — если нет, старт будет отклонён с указанием причины.</p>
     <table><thead><tr><th>Название</th><th id="thOwner" style="display:none">Создал</th><th>Вход</th><th>Выход</th><th>Статус</th><th>Логотип</th><th>Буфер</th><th>Действия</th></tr></thead>
     <tbody id="streamRows"></tbody></table>
@@ -774,6 +786,23 @@ footer{color:var(--mut);text-align:center;padding:26px 0 18px;font-size:12px}
       <button class="btn" onclick="presetAdd()">Добавить</button>
     </div>
     <div class="row" style="justify-content:flex-end"><button class="btn gray" onclick="$('#presetsDlg').close()">Закрыть</button></div>
+  </div>
+</dialog>
+
+<dialog id="syncDlg">
+  <div style="padding:20px;display:flex;flex-direction:column;gap:10px;min-width:420px;max-width:600px">
+    <h3 style="margin:0">Синхронизировать потоки</h3>
+    <p class="muted" style="margin:0">Потоки текущего сервера будут созданы на выбранных. Одноимённые — обновлены, а не продублированы.</p>
+    <div id="syncDlgList" style="display:flex;flex-direction:column;gap:6px"></div>
+    <div style="background:#151b28;border:1px solid var(--line);border-radius:8px;padding:8px 12px">
+      <b>Копия создаётся остановленной</b>
+      <div class="muted" style="font-size:12px">Копируется всё: кадр, кодек, вход, выход во Flussonic, логотип с координатами, буфер и заглушка (картинки переносятся в медиатеку целевого сервера). Автостарт при этом принудительно выключен — два сервера, публикующие в один адрес Flussonic, рвали бы эфир друг другу. Запускать копию — ваше решение.</div>
+    </div>
+    <p id="syncResult" class="muted" style="margin:0;white-space:pre-line"></p>
+    <div class="row" style="justify-content:flex-end;gap:6px">
+      <button class="btn gray" onclick="$('#syncDlg').close()">Закрыть</button>
+      <button class="btn" id="syncGoBtn" onclick="syncAllRun()">Синхронизировать</button>
+    </div>
   </div>
 </dialog>
 
@@ -1549,7 +1578,7 @@ async function loadStreams(){
         <button class="actBtn" onclick="presetsOpen(${s.id})">${ICO('antenna')}${TT("Входы")}</button>
         <button class="actBtn" onclick="streamEditOpen(${s.id})">${TT("Редактировать")}</button>
         <button class="actBtn" onclick="cloneStream(${s.id})">${ICO('clone')}${TT("Клонировать")}</button>
-        <button class="actBtn danger" onclick="if(confirm(TT('Удалить поток?')))api('streams/${s.id}',{method:'DELETE'}).then(loadStreams)">✕</button>
+        <button class="actBtn danger" onclick="rmStream(${s.id})">✕</button>
       </td></tr>`}).join("");
   const opts=list.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join("");
   setOpts($("#scStream"),`<option value="0">— все потоки —</option>`+opts);
@@ -1806,6 +1835,18 @@ async function streamAdd(){
     const base=(info&&info.direct_port_base)||17000;
     const addr=`srt://${agentSrtHost()||"адрес-сервера"}:${base+created.id}`;
     prompt(TT("Впишите этот адрес в энкодер (SRT MODE = Caller, Stream ID пустой):"),addr);
+  }
+  if($("#stSync")&&$("#stSync").checked){
+    const targets=syncSelectedTargets(".syncTgt");
+    if(targets.length){
+      try{
+        const r=await req("/sync/streams",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({stream_ids:[created.id],targets})});
+        const bad=(r.report||[]).filter(x=>x.errors&&x.errors.length);
+        if(bad.length)alert(TT("Поток создан, но не на всех серверах")+":\n"+
+          bad.map(x=>x.agent+": "+x.errors.join("; ")).join("\n"));
+      }catch(e){alert(TT("Поток создан, но синхронизация не удалась")+": "+(e.message||e))}
+    }
   }
   $("#stInCheck").textContent="";
   loadStreams();
@@ -2229,6 +2270,11 @@ async function loadAgents(){
     // адрес/порт SRT-push зависят от выбранного сервера — если форма открыта в
     // режиме push, подсказку надо пересобрать под новый агент
     if($("#stInMode")&&$("#stInMode").value==="push")stPushHintRender();
+    // синхронизация имеет смысл, только когда есть куда синхронизировать
+    const many=list.length>1;
+    if($("#stSyncWrap"))$("#stSyncWrap").style.display=many?"":"none";
+    if($("#syncAllBtn"))$("#syncAllBtn").style.display=many?"":"none";
+    if(!many&&$("#stSync")){$("#stSync").checked=false;syncTargetsToggle()}
     if(IS_ADMIN){
       $("#agentsCard").style.display="";
       $("#agentRows").innerHTML=list.map(a=>`<tr><td>${a.id}</td><td>${esc(a.name)}</td>
@@ -2786,6 +2832,70 @@ async function presetActivate(pid){
 // разном порядке, и раньше настройка жила только на уровне потока: после
 // переключения входа в эфир уходила тишина, потому что дорожки с прежним
 // номером у нового источника не оказывалось.
+async function rmStream(sid){
+  const s=STREAMS_CACHE.find(x=>x.id===sid);
+  if(!confirm(TT("Удалить поток?")))return;
+  await api("streams/"+sid,{method:"DELETE"});
+  // на других серверах может лежать одноимённая копия (создана синхронизацией) —
+  // спрашиваем отдельно, чтобы случайно не снести чужой поток с тем же именем
+  const others=otherAgents();
+  if(s&&others.length&&confirm(
+      TT("Удалить поток с тем же названием и на других серверах?")+"\n\n«"+s.name+"»\n"
+      +others.map(a=>"• "+a.name).join("\n")
+      +"\n\n"+TT("Отмена — удалить только на текущем сервере."))){
+    try{
+      const r=await req("/sync/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({name:s.name,targets:others.map(a=>a.id)})});
+      const msg=(r.report||[]).map(x=>x.agent+": "+(x.deleted?TT("удалён"):TT("не найден"))
+        +(x.error?" ⚠ "+x.error:"")).join("\n");
+      if(msg)alert(msg);
+    }catch(e){alert(TT("Ошибка")+": "+(e.message||e))}
+  }
+  loadStreams();
+}
+// ---- синхронизация потоков между серверами.
+// Потоки сопоставляются ПО ИМЕНИ: id у серверов независимые. Одноимённый
+// поток на цели обновляется, отсутствующий — создаётся.
+function otherAgents(){
+  const cur=getAgentId();
+  return (AGENTS_CACHE||[]).filter(a=>String(a.id)!==String(cur));
+}
+function syncTargetsToggle(){
+  const on=$("#stSync").checked;
+  $("#stSyncBox").style.display=on?"":"none";
+  if(on)$("#stSyncList").innerHTML=otherAgents().map(a=>
+    `<label style="display:flex;gap:6px;align-items:center">
+       <input type="checkbox" class="syncTgt" value="${a.id}" checked> ${esc(a.name)}</label>`).join("")
+    ||`<span class="muted">${TT("других серверов нет")}</span>`;
+}
+function syncSelectedTargets(sel){
+  return [...document.querySelectorAll(sel+":checked")].map(x=>+x.value);
+}
+function syncAllDlg(){
+  $("#syncResult").textContent="";
+  $("#syncDlgList").innerHTML=otherAgents().map(a=>
+    `<label style="display:flex;gap:8px;align-items:center">
+       <input type="checkbox" class="syncDlgTgt" value="${a.id}" checked>
+       <b>${esc(a.name)}</b> <span class="muted" style="font-size:12px">${esc(a.url||"")}</span></label>`).join("")
+    ||`<span class="muted">${TT("других серверов нет")}</span>`;
+  $("#syncDlg").showModal();
+}
+async function syncAllRun(){
+  const targets=syncSelectedTargets(".syncDlgTgt");
+  if(!targets.length)return alert(TT("Выберите хотя бы один сервер"));
+  const btn=$("#syncGoBtn"), old=btn.textContent;
+  btn.disabled=true; btn.textContent=TT("Копирую…");
+  $("#syncResult").textContent="";
+  try{
+    const r=await req("/sync/streams",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({all:true,targets})});
+    $("#syncResult").textContent=(r.report||[]).map(x=>
+      `${x.agent}: ${TT("создано")} ${x.created}, ${TT("обновлено")} ${x.updated}`
+      +(x.errors&&x.errors.length?`\n   ⚠ ${x.errors.join("\n   ⚠ ")}`:"")).join("\n");
+    loadStreams();
+  }catch(e){$("#syncResult").textContent=TT("Ошибка")+": "+(e.message||e)}
+  btn.disabled=false; btn.textContent=old;
+}
 // ---- передача потока оператору (только для админа).
 // Оператор видит и трогает только свои потоки, поэтому «отдать канал» —
 // частая административная задача: человек вышел на смену, ему нужен доступ.
@@ -3081,6 +3191,21 @@ const I18N_TM={
 "Отдельный от рекламного баннера слой, показывается всё время, пока поток запущен (обычно PNG с прозрачностью в углу экрана).":"Mahabat bannerinden aýry gatlak, ýaýlym işleýän wagty hemişe görkezilýär (adatça ekranyň burçunda dury PNG).",
 "картинка (баннер из библиотеки)":"surat (kitaphanadan banner)","— выключено —":"— öçürilen —",
 "Удалить?":"Pozmaly?","Удалить баннер?":"Banneri pozmaly?","Удалить поток?":"Ýaýlymy pozmaly?",
+"создать и на других серверах":"beýleki serwerlerde-de döretmek",
+"Отметьте серверы, на которых создать такой же поток:":"Şeýle ýaýlym dörediljek serwerleri belläň:",
+"Синхронизировать потоки":"Ýaýlymlary sinhronlaşdyrmak",
+"⇄ Синхронизировать сейчас":"⇄ Häzir sinhronlaşdyr",
+"Синхронизировать":"Sinhronlaşdyr",
+"других серверов нет":"başga serwer ýok",
+"Выберите хотя бы один сервер":"Iň bolmanda bir serweri saýlaň",
+"Копирую…":"Göçürilýär…",
+"Копия создаётся остановленной":"Nusga saklanan ýagdaýda döredilýär",
+"Потоки текущего сервера будут созданы на выбранных. Одноимённые — обновлены, а не продублированы.":"Şu serweriň ýaýlymlary saýlananlarda dörediler. Şol atlylar — göçürilmän, täzelener.",
+"создано":"döredildi","обновлено":"täzelendi","удалён":"pozuldy","не найден":"tapylmady",
+"Поток создан, но не на всех серверах":"Ýaýlym döredildi, ýöne ähli serwerlerde däl",
+"Поток создан, но синхронизация не удалась":"Ýaýlym döredildi, ýöne sinhronlaşdyrma başartmady",
+"Удалить поток с тем же названием и на других серверах?":"Şol at bilen ýaýlymy beýleki serwerlerde-de pozmalymy?",
+"Отмена — удалить только на текущем сервере.":"Ýatyr — diňe şu serwerde pozmak.",
 "Удалить шаблон?":"Şablony pozmaly?","Удалить пользователя?":"Ulanyjyny pozmaly?",
 "Выберите файл":"Faýl saýlaň","Укажите название и HTML":"Ady we HTML giriziň","Сохранено":"Ýatda saklandy",
 "Лимиты сохранены":"Limitler ýatda saklandy","Пароль изменён":"Açar söz üýtgedildi",
